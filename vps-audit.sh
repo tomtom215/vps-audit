@@ -12,11 +12,19 @@
 # PHASE 1: CORE INFRASTRUCTURE & SAFETY
 # =============================================================================
 
-# Exit on error, undefined variables, and pipeline failures (Issue #1)
+# Exit on pipeline failures (Issue #1)
+# Note: We don't use set -eu because many commands intentionally may fail
+# and we handle errors explicitly throughout the script
 set -o pipefail
 
+# Prevent accidental overwriting of files
+set -o noclobber
+
 # Script version for tracking (Issue #33)
-readonly VERSION="2.0.0"
+readonly VERSION="2.1.0"
+
+# Minimum required Bash version
+readonly MIN_BASH_VERSION="4.0"
 
 # Global state
 REPORT_FILE=""
@@ -42,6 +50,7 @@ declare -A CONFIG=(
     [checks]="all"
     [quiet]="false"
     [dry_run]="false"
+    [show_guide]="false"
 )
 
 # Configurable thresholds (Issue #37)
@@ -208,6 +217,60 @@ check_root() {
         echo "ERROR: This script must be run as root or with sudo" >&2
         echo "Usage: sudo $0 [options]" >&2
         exit 1
+    fi
+}
+
+# =============================================================================
+# BASH VERSION CHECK
+# =============================================================================
+
+check_bash_version() {
+    local bash_major="${BASH_VERSINFO[0]:-0}"
+    local bash_minor="${BASH_VERSINFO[1]:-0}"
+    local required_major="${MIN_BASH_VERSION%%.*}"
+    local required_minor="${MIN_BASH_VERSION##*.}"
+
+    if [[ $bash_major -lt $required_major ]] || \
+       { [[ $bash_major -eq $required_major ]] && [[ $bash_minor -lt $required_minor ]]; }; then
+        echo "ERROR: Bash version $MIN_BASH_VERSION or higher is required" >&2
+        echo "Current version: ${BASH_VERSION:-unknown}" >&2
+        exit 1
+    fi
+}
+
+# =============================================================================
+# PREREQUISITES CHECK
+# =============================================================================
+
+check_prerequisites() {
+    local missing_required=()
+    local missing_recommended=()
+
+    # Required commands
+    local required_cmds=("grep" "awk" "sed" "cut" "find" "stat" "mktemp" "hostname" "uname" "date")
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing_required+=("$cmd")
+        fi
+    done
+
+    # Recommended commands
+    local recommended_cmds=("curl" "ss" "sysctl" "journalctl")
+    for cmd in "${recommended_cmds[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing_recommended+=("$cmd")
+        fi
+    done
+
+    if [[ ${#missing_required[@]} -gt 0 ]]; then
+        echo "ERROR: Missing required commands: ${missing_required[*]}" >&2
+        echo "Please install the required packages and try again." >&2
+        exit 1
+    fi
+
+    if [[ ${#missing_recommended[@]} -gt 0 ]] && [[ "${CONFIG[quiet]}" != "true" ]]; then
+        echo -e "${YELLOW}[INFO]${NC} Some recommended commands are missing: ${missing_recommended[*]}" >&2
+        echo -e "${YELLOW}[INFO]${NC} Some checks may be skipped or produce limited results." >&2
     fi
 }
 
@@ -647,9 +710,19 @@ add_json_result() {
     local status="$2"
     local message="$3"
 
-    # Escape JSON strings
-    test_name=$(echo "$test_name" | sed 's/"/\\"/g; s/\\/\\\\/g')
-    message=$(echo "$message" | sed 's/"/\\"/g; s/\\/\\\\/g')
+    # Properly escape JSON strings (order matters: backslash first, then other chars)
+    json_escape() {
+        local str="$1"
+        str="${str//\\/\\\\}"      # Escape backslashes first
+        str="${str//\"/\\\"}"      # Escape double quotes
+        str="${str//$'\n'/\\n}"    # Escape newlines
+        str="${str//$'\r'/\\r}"    # Escape carriage returns
+        str="${str//$'\t'/\\t}"    # Escape tabs
+        printf '%s' "$str"
+    }
+
+    test_name=$(json_escape "$test_name")
+    message=$(json_escape "$message")
 
     local json_entry='{"name":"'"$test_name"'","status":"'"$status"'","message":"'"$message"'"}'
 
@@ -679,6 +752,9 @@ usage() {
     cat << EOF
 VPS Security Audit Tool v${VERSION}
 
+A comprehensive security auditing tool for Linux VPS systems.
+Run this script on a new VPS to identify security issues and harden your server.
+
 Usage: $0 [OPTIONS]
 
 Options:
@@ -688,6 +764,7 @@ Options:
     -o, --output DIR        Output directory for report (default: current)
     -f, --format FORMAT     Output format: text, json, both (default: text)
     -V, --verbose           Enable verbose/debug output
+    --guide                 Show quick-start hardening guide for new VPS
     --no-network            Skip checks requiring network access
     --no-suid               Skip SUID file scan (can be slow)
     --checks LIST           Comma-separated list of checks to run
@@ -701,10 +778,39 @@ Threshold Options:
     --login-warn NUM        Failed login warning threshold (default: 10)
     --login-fail NUM        Failed login failure threshold (default: 50)
 
+Available Check Categories:
+    ssh         SSH configuration (root login, password auth, port, key permissions)
+    firewall    Firewall status (UFW, firewalld, iptables, nftables)
+    ips         Intrusion prevention (fail2ban, crowdsec)
+    updates     System updates and auto-updates
+    logins      Failed login attempts
+    services    Running services analysis
+    ports       Open ports detection
+    resources   Disk, memory, CPU usage
+    sudo        Sudo logging configuration
+    password    Password policy and account lockout
+    suid        SUID/SGID file scanning
+    mac         SELinux/AppArmor status
+    kernel      Kernel hardening (sysctl settings)
+    users       User account auditing
+    files       File permissions (world-writable, logs, umask)
+    time        Time synchronization
+    audit       Audit daemon status
+    core        Core dump settings
+    cron        Cron security
+    network     Network protocols, IPv6, wireless
+
 Examples:
     sudo $0                         # Run all checks
+    sudo $0 --guide                 # Show hardening guide for new VPS
     sudo $0 -q -f json              # Quiet mode with JSON output
     sudo $0 --no-suid --no-network  # Skip slow/network checks
+    sudo $0 --checks ssh,firewall   # Run only specific checks
+
+Exit Codes:
+    0   All checks passed (or only warnings)
+    1   One or more checks failed
+    2   Critical security issues found
 
 Report bugs to: https://github.com/vernu/vps-audit/issues
 EOF
@@ -720,6 +826,9 @@ parse_args() {
             -v|--version)
                 echo "VPS Security Audit Tool v${VERSION}"
                 exit 0
+                ;;
+            --guide)
+                CONFIG[show_guide]="true"
                 ;;
             -q|--quiet)
                 CONFIG[quiet]="true"
@@ -840,7 +949,7 @@ parse_args() {
     done
 }
 
-# Load configuration file if exists
+# Load configuration file if exists (with security validation)
 load_config() {
     local config_files=(
         "/etc/vps-audit.conf"
@@ -850,6 +959,23 @@ load_config() {
 
     for config_file in "${config_files[@]}"; do
         if [[ -f "$config_file" ]] && [[ -r "$config_file" ]]; then
+            # Security check: verify file ownership and permissions
+            local file_owner file_perms
+            file_owner=$(stat -c '%u' "$config_file" 2>/dev/null || stat -f '%u' "$config_file" 2>/dev/null)
+            file_perms=$(stat -c '%a' "$config_file" 2>/dev/null || stat -f '%Lp' "$config_file" 2>/dev/null)
+
+            # Config file must be owned by root or current user
+            if [[ "$file_owner" != "0" ]] && [[ "$file_owner" != "$EUID" ]]; then
+                log_warning "Ignoring config file $config_file - not owned by root or current user"
+                continue
+            fi
+
+            # Config file should not be world-writable
+            if [[ "${file_perms: -1}" =~ [2367] ]]; then
+                log_warning "Ignoring config file $config_file - world-writable (insecure)"
+                continue
+            fi
+
             log_debug "Loading config from: $config_file"
             # shellcheck source=/dev/null
             source "$config_file"
@@ -1989,6 +2115,501 @@ check_core_dumps() {
     fi
 }
 
+# =============================================================================
+# PHASE 8: ADDITIONAL PRODUCTION HARDENING CHECKS
+# =============================================================================
+
+# SSH Key Permissions Check
+check_ssh_key_permissions() {
+    should_run_check "ssh" || return 0
+
+    local issues=()
+
+    # Check root SSH directory
+    if [[ -d /root/.ssh ]]; then
+        local root_ssh_perms
+        root_ssh_perms=$(stat -c '%a' /root/.ssh 2>/dev/null || stat -f '%Lp' /root/.ssh 2>/dev/null)
+        if [[ "$root_ssh_perms" != "700" ]]; then
+            issues+=("/root/.ssh has insecure permissions: $root_ssh_perms (should be 700)")
+        fi
+
+        # Check authorized_keys
+        if [[ -f /root/.ssh/authorized_keys ]]; then
+            local auth_perms
+            auth_perms=$(stat -c '%a' /root/.ssh/authorized_keys 2>/dev/null || stat -f '%Lp' /root/.ssh/authorized_keys 2>/dev/null)
+            if [[ "$auth_perms" != "600" ]] && [[ "$auth_perms" != "644" ]]; then
+                issues+=("/root/.ssh/authorized_keys has insecure permissions: $auth_perms")
+            fi
+        fi
+    fi
+
+    # Check user SSH directories
+    while IFS=: read -r username _ uid _ _ homedir _; do
+        [[ $uid -lt 1000 ]] && continue
+        [[ ! -d "$homedir/.ssh" ]] && continue
+
+        local ssh_perms
+        ssh_perms=$(stat -c '%a' "$homedir/.ssh" 2>/dev/null || stat -f '%Lp' "$homedir/.ssh" 2>/dev/null)
+        if [[ "$ssh_perms" != "700" ]]; then
+            issues+=("$homedir/.ssh has insecure permissions: $ssh_perms")
+        fi
+    done < /etc/passwd
+
+    if [[ ${#issues[@]} -eq 0 ]]; then
+        check_security "SSH Key Permissions" "PASS" "SSH directories have correct permissions" ""
+    else
+        local issue_count=${#issues[@]}
+        check_security "SSH Key Permissions" "WARN" "Found $issue_count SSH permission issues" \
+            "Fix SSH directory permissions: chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
+    fi
+}
+
+# SGID Files Check (complementing SUID check)
+check_sgid_files() {
+    should_run_check "suid" || return 0
+
+    if [[ "${CONFIG[skip_suid_scan]}" == "true" ]]; then
+        return
+    fi
+
+    show_progress "Scanning for SGID files"
+
+    # Known safe SGID binaries
+    local known_safe_sgid=(
+        "/usr/bin/wall" "/usr/bin/write" "/usr/bin/ssh-agent"
+        "/usr/bin/expiry" "/usr/bin/chage" "/usr/bin/crontab"
+        "/usr/bin/bsd-write" "/usr/bin/mlocate"
+        "/usr/sbin/unix_chkpwd" "/usr/sbin/postdrop" "/usr/sbin/postqueue"
+    )
+
+    local exclude_pattern
+    exclude_pattern=$(printf "|%s" "${known_safe_sgid[@]}")
+    exclude_pattern="(${exclude_pattern:1})$"
+
+    local suspicious_sgid=()
+    while IFS= read -r file; do
+        if [[ -n "$file" ]] && ! echo "$file" | grep -qE "$exclude_pattern"; then
+            suspicious_sgid+=("$file")
+        fi
+    done < <(find / -xdev -type f -perm -2000 2>/dev/null)
+
+    clear_progress
+
+    local sgid_count=${#suspicious_sgid[@]}
+
+    if [[ $sgid_count -eq 0 ]]; then
+        check_security "SGID Files" "PASS" "No unexpected SGID files found" ""
+    elif [[ $sgid_count -lt 5 ]]; then
+        check_security "SGID Files" "WARN" "Found $sgid_count SGID files to review" \
+            "Verify these SGID files are legitimate"
+    else
+        check_security "SGID Files" "WARN" "Found $sgid_count unexpected SGID files" \
+            "Review SGID files for security implications"
+        for file in "${suspicious_sgid[@]}"; do
+            echo "  SGID file: $file" >> "$REPORT_FILE"
+        done
+    fi
+}
+
+# Cron Security Check
+check_cron_security() {
+    should_run_check "cron" || return 0
+
+    local issues=()
+
+    # Check cron.allow and cron.deny
+    if [[ ! -f /etc/cron.allow ]] && [[ ! -f /etc/cron.deny ]]; then
+        issues+=("No cron access control (cron.allow/cron.deny)")
+    fi
+
+    # Check crontab directory permissions
+    for crondir in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly; do
+        if [[ -d "$crondir" ]]; then
+            local perms
+            perms=$(stat -c '%a' "$crondir" 2>/dev/null || stat -f '%Lp' "$crondir" 2>/dev/null)
+            if [[ "${perms: -1}" =~ [2367] ]]; then
+                issues+=("$crondir is world-writable")
+            fi
+        fi
+    done
+
+    # Check for world-readable crontabs with sensitive content
+    if [[ -d /var/spool/cron/crontabs ]]; then
+        local perms
+        perms=$(stat -c '%a' /var/spool/cron/crontabs 2>/dev/null || stat -f '%Lp' /var/spool/cron/crontabs 2>/dev/null)
+        if [[ "$perms" != "700" ]] && [[ "$perms" != "1730" ]]; then
+            issues+=("/var/spool/cron/crontabs has weak permissions: $perms")
+        fi
+    fi
+
+    if [[ ${#issues[@]} -eq 0 ]]; then
+        check_security "Cron Security" "PASS" "Cron configuration is secure" ""
+    else
+        check_security "Cron Security" "WARN" "Found ${#issues[@]} cron security issues" \
+            "Review cron permissions and access controls"
+    fi
+}
+
+# Dangerous Network Protocols Check
+check_dangerous_protocols() {
+    should_run_check "kernel" || return 0
+
+    local dangerous_protocols=("dccp" "sctp" "rds" "tipc")
+    local loaded_dangerous=()
+
+    for proto in "${dangerous_protocols[@]}"; do
+        if lsmod 2>/dev/null | grep -q "^$proto"; then
+            loaded_dangerous+=("$proto")
+        fi
+    done
+
+    # Check if protocols are blacklisted
+    local blacklisted=0
+    for proto in "${dangerous_protocols[@]}"; do
+        if grep -rq "install $proto /bin/true\|install $proto /bin/false\|blacklist $proto" /etc/modprobe.d/ 2>/dev/null; then
+            ((blacklisted++)) || true
+        fi
+    done
+
+    if [[ ${#loaded_dangerous[@]} -gt 0 ]]; then
+        check_security "Network Protocols" "WARN" "Dangerous protocols loaded: ${loaded_dangerous[*]}" \
+            "Blacklist unnecessary protocols in /etc/modprobe.d/"
+    elif [[ $blacklisted -lt ${#dangerous_protocols[@]} ]]; then
+        check_security "Network Protocols" "WARN" "Some dangerous protocols not explicitly disabled" \
+            "Add 'install <protocol> /bin/true' to /etc/modprobe.d/blacklist.conf"
+    else
+        check_security "Network Protocols" "PASS" "Dangerous protocols are disabled" ""
+    fi
+}
+
+# Login Banner Check
+check_login_banner() {
+    should_run_check "system" || return 0
+
+    local has_banner=false
+
+    # Check SSH banner
+    local ssh_banner
+    ssh_banner=$(get_ssh_config "Banner" "none")
+    if [[ "$ssh_banner" != "none" ]] && [[ -f "$ssh_banner" ]]; then
+        has_banner=true
+    fi
+
+    # Check /etc/issue and /etc/issue.net
+    if [[ -f /etc/issue ]] && [[ -s /etc/issue ]]; then
+        local issue_content
+        issue_content=$(cat /etc/issue)
+        # Check it's not just default content
+        if [[ ! "$issue_content" =~ "Ubuntu\|Debian\|CentOS\|Red Hat\|\\\\n\|\\\\l" ]]; then
+            has_banner=true
+        fi
+    fi
+
+    if [[ "$has_banner" == "true" ]]; then
+        check_security "Login Banner" "PASS" "Login warning banner is configured" ""
+    else
+        check_security "Login Banner" "WARN" "No login warning banner configured" \
+            "Configure a warning banner in /etc/issue and SSH Banner directive"
+    fi
+}
+
+# Account Lockout Policy Check
+check_account_lockout() {
+    should_run_check "password" || return 0
+
+    local lockout_configured=false
+
+    # Check pam_faillock (modern) or pam_tally2 (legacy)
+    if grep -rq "pam_faillock.so" /etc/pam.d/ 2>/dev/null; then
+        lockout_configured=true
+    elif grep -rq "pam_tally2.so" /etc/pam.d/ 2>/dev/null; then
+        lockout_configured=true
+    fi
+
+    # Check fail2ban as alternative
+    if service_is_active fail2ban 2>/dev/null; then
+        lockout_configured=true
+    fi
+
+    if [[ "$lockout_configured" == "true" ]]; then
+        check_security "Account Lockout" "PASS" "Account lockout policy is configured" ""
+    else
+        check_security "Account Lockout" "WARN" "No account lockout policy detected" \
+            "Configure pam_faillock or fail2ban to prevent brute force attacks"
+    fi
+}
+
+# Umask Settings Check
+check_umask_settings() {
+    should_run_check "files" || return 0
+
+    local secure_umask=false
+    local umask_value=""
+
+    # Check /etc/login.defs
+    if [[ -f /etc/login.defs ]]; then
+        umask_value=$(grep "^UMASK" /etc/login.defs 2>/dev/null | awk '{print $2}')
+        if [[ "$umask_value" == "027" ]] || [[ "$umask_value" == "077" ]]; then
+            secure_umask=true
+        fi
+    fi
+
+    # Check /etc/profile and /etc/bashrc
+    for file in /etc/profile /etc/bashrc /etc/bash.bashrc; do
+        if [[ -f "$file" ]]; then
+            if grep -q "umask 027\|umask 077" "$file" 2>/dev/null; then
+                secure_umask=true
+                break
+            fi
+        fi
+    done
+
+    if [[ "$secure_umask" == "true" ]]; then
+        check_security "Umask Settings" "PASS" "Secure umask is configured" ""
+    else
+        check_security "Umask Settings" "WARN" "Default umask may be too permissive" \
+            "Set UMASK to 027 or 077 in /etc/login.defs"
+    fi
+}
+
+# Log File Permissions Check
+check_log_permissions() {
+    should_run_check "files" || return 0
+
+    local issues=()
+
+    # Check key log files
+    local log_files=(
+        "/var/log/auth.log"
+        "/var/log/secure"
+        "/var/log/syslog"
+        "/var/log/messages"
+        "/var/log/kern.log"
+    )
+
+    for logfile in "${log_files[@]}"; do
+        if [[ -f "$logfile" ]]; then
+            local perms owner
+            perms=$(stat -c '%a' "$logfile" 2>/dev/null || stat -f '%Lp' "$logfile" 2>/dev/null)
+            owner=$(stat -c '%U' "$logfile" 2>/dev/null || stat -f '%Su' "$logfile" 2>/dev/null)
+
+            # Log files should not be world-readable for sensitive logs
+            if [[ "${perms: -1}" =~ [4567] ]]; then
+                issues+=("$logfile is world-readable")
+            fi
+        fi
+    done
+
+    # Check /var/log directory itself
+    if [[ -d /var/log ]]; then
+        local log_perms
+        log_perms=$(stat -c '%a' /var/log 2>/dev/null || stat -f '%Lp' /var/log 2>/dev/null)
+        if [[ "${log_perms: -1}" =~ [2367] ]]; then
+            issues+=("/var/log is world-writable")
+        fi
+    fi
+
+    if [[ ${#issues[@]} -eq 0 ]]; then
+        check_security "Log Permissions" "PASS" "Log file permissions are secure" ""
+    else
+        check_security "Log Permissions" "WARN" "Found ${#issues[@]} log permission issues" \
+            "Restrict log file permissions (chmod 640 for sensitive logs)"
+    fi
+}
+
+# Secure Boot / UEFI Check
+check_secure_boot() {
+    should_run_check "system" || return 0
+
+    local secure_boot_status="unknown"
+
+    # Check if running UEFI
+    if [[ -d /sys/firmware/efi ]]; then
+        # Check SecureBoot status
+        if [[ -f /sys/firmware/efi/efivars/SecureBoot-* ]] 2>/dev/null; then
+            local sb_value
+            sb_value=$(od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | awk '{print $NF}')
+            if [[ "$sb_value" == "1" ]]; then
+                secure_boot_status="enabled"
+            else
+                secure_boot_status="disabled"
+            fi
+        fi
+
+        # Alternative check via mokutil
+        if command -v mokutil &>/dev/null; then
+            if mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot enabled"; then
+                secure_boot_status="enabled"
+            fi
+        fi
+
+        if [[ "$secure_boot_status" == "enabled" ]]; then
+            check_security "Secure Boot" "PASS" "UEFI Secure Boot is enabled" ""
+        elif [[ "$secure_boot_status" == "disabled" ]]; then
+            check_security "Secure Boot" "WARN" "UEFI Secure Boot is disabled" \
+                "Consider enabling Secure Boot for enhanced boot security"
+        else
+            check_security "Secure Boot" "WARN" "Unable to determine Secure Boot status" ""
+        fi
+    else
+        # Legacy BIOS - check for GRUB password
+        if [[ -f /boot/grub/grub.cfg ]] || [[ -f /boot/grub2/grub.cfg ]]; then
+            if grep -q "password" /etc/grub.d/* 2>/dev/null || \
+               grep -q "set superusers" /etc/grub.d/* 2>/dev/null; then
+                check_security "Bootloader Security" "PASS" "GRUB password is configured" ""
+            else
+                check_security "Bootloader Security" "WARN" "GRUB password not configured" \
+                    "Configure GRUB password to prevent unauthorized boot modifications"
+            fi
+        fi
+    fi
+}
+
+# Process Accounting Check
+check_process_accounting() {
+    should_run_check "audit" || return 0
+
+    local accounting_enabled=false
+
+    # Check for psacct/acct
+    if pkg_installed psacct || pkg_installed acct; then
+        if service_is_active psacct 2>/dev/null || service_is_active acct 2>/dev/null; then
+            accounting_enabled=true
+        fi
+    fi
+
+    # Check if lastcomm works (indicates accounting is on)
+    if command -v lastcomm &>/dev/null && lastcomm 2>/dev/null | head -1 | grep -q .; then
+        accounting_enabled=true
+    fi
+
+    if [[ "$accounting_enabled" == "true" ]]; then
+        check_security "Process Accounting" "PASS" "Process accounting is enabled" ""
+    else
+        check_security "Process Accounting" "WARN" "Process accounting not enabled" \
+            "Install and enable psacct/acct for command auditing"
+    fi
+}
+
+# IPv6 Security Check
+check_ipv6_security() {
+    should_run_check "network" || return 0
+
+    local ipv6_enabled=false
+    local ipv6_configured=false
+
+    # Check if IPv6 is enabled
+    if [[ -f /proc/sys/net/ipv6/conf/all/disable_ipv6 ]]; then
+        local disabled
+        disabled=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)
+        if [[ "$disabled" == "0" ]]; then
+            ipv6_enabled=true
+        fi
+    fi
+
+    if [[ "$ipv6_enabled" == "true" ]]; then
+        # Check if IPv6 is actually being used
+        if ip -6 addr show 2>/dev/null | grep -q "inet6.*global"; then
+            ipv6_configured=true
+        fi
+
+        # Check IPv6 firewall if enabled
+        if [[ "$ipv6_configured" == "true" ]]; then
+            if command -v ip6tables &>/dev/null; then
+                local ipv6_rules
+                ipv6_rules=$(ip6tables -L INPUT -n 2>/dev/null | tail -n +3 | wc -l)
+                if [[ $ipv6_rules -eq 0 ]]; then
+                    check_security "IPv6 Security" "WARN" "IPv6 is enabled but no firewall rules" \
+                        "Configure ip6tables rules or disable IPv6 if not needed"
+                    return
+                fi
+            fi
+            check_security "IPv6 Security" "PASS" "IPv6 is enabled with firewall protection" ""
+        else
+            check_security "IPv6 Security" "PASS" "IPv6 enabled but not configured (safe)" ""
+        fi
+    else
+        check_security "IPv6 Security" "PASS" "IPv6 is disabled" ""
+    fi
+}
+
+# Wireless Interface Check (for servers)
+check_wireless_interfaces() {
+    should_run_check "network" || return 0
+
+    local wireless_count=0
+
+    # Check for wireless interfaces
+    if command -v iw &>/dev/null; then
+        wireless_count=$(iw dev 2>/dev/null | grep -c "Interface" || echo 0)
+    elif [[ -d /sys/class/net ]]; then
+        for iface in /sys/class/net/*; do
+            if [[ -d "$iface/wireless" ]]; then
+                ((wireless_count++)) || true
+            fi
+        done
+    fi
+
+    if [[ $wireless_count -eq 0 ]]; then
+        check_security "Wireless Interfaces" "PASS" "No wireless interfaces detected (expected for server)" ""
+    else
+        check_security "Wireless Interfaces" "WARN" "Found $wireless_count wireless interface(s)" \
+            "Disable wireless interfaces on production servers if not needed"
+    fi
+}
+
+# USB Storage Restriction Check
+check_usb_storage() {
+    should_run_check "system" || return 0
+
+    local usb_disabled=false
+
+    # Check if usb-storage module is blacklisted
+    if grep -rq "blacklist usb-storage\|install usb-storage /bin/true\|install usb-storage /bin/false" /etc/modprobe.d/ 2>/dev/null; then
+        usb_disabled=true
+    fi
+
+    # Check if usb-storage is currently loaded
+    local usb_loaded=false
+    if lsmod 2>/dev/null | grep -q "usb_storage"; then
+        usb_loaded=true
+    fi
+
+    if [[ "$usb_disabled" == "true" ]] && [[ "$usb_loaded" == "false" ]]; then
+        check_security "USB Storage" "PASS" "USB storage is disabled" ""
+    elif [[ "$usb_loaded" == "true" ]]; then
+        check_security "USB Storage" "WARN" "USB storage module is loaded" \
+            "Consider disabling USB storage on production servers"
+    else
+        check_security "USB Storage" "WARN" "USB storage not explicitly disabled" \
+            "Add 'blacklist usb-storage' to /etc/modprobe.d/blacklist.conf"
+    fi
+}
+
+# Compiler Access Check (production servers shouldn't have compilers)
+check_compiler_access() {
+    should_run_check "system" || return 0
+
+    local compilers=("gcc" "g++" "cc" "clang" "make" "as" "ld")
+    local found_compilers=()
+
+    for compiler in "${compilers[@]}"; do
+        if command -v "$compiler" &>/dev/null; then
+            found_compilers+=("$compiler")
+        fi
+    done
+
+    if [[ ${#found_compilers[@]} -eq 0 ]]; then
+        check_security "Compiler Access" "PASS" "No compilers found (good for production)" ""
+    elif [[ ${#found_compilers[@]} -lt 3 ]]; then
+        check_security "Compiler Access" "WARN" "Compilers found: ${found_compilers[*]}" \
+            "Consider removing compilers from production servers"
+    else
+        check_security "Compiler Access" "WARN" "Multiple compilers installed: ${found_compilers[*]}" \
+            "Remove development tools from production systems"
+    fi
+}
+
 # Public IP Check (Issue #4)
 get_public_ip() {
     if [[ "${CONFIG[skip_network]}" == "true" ]]; then
@@ -2020,6 +2641,17 @@ get_public_ip() {
 # SUMMARY AND RECOMMENDATIONS (Issues #69, #70, #71)
 # =============================================================================
 
+# Priority order for recommendations
+get_priority() {
+    local check_name="$1"
+    case "$check_name" in
+        *"Root Login"*|*"Firewall"*) echo "1-CRITICAL" ;;
+        *"Password Auth"*|*"Updates"*|*"Intrusion"*) echo "2-HIGH" ;;
+        *"SSH"*|*"Port"*|*"SUID"*|*"Kernel"*) echo "3-MEDIUM" ;;
+        *) echo "4-LOW" ;;
+    esac
+}
+
 print_summary() {
     local total=$((PASS_COUNT + WARN_COUNT + FAIL_COUNT))
 
@@ -2036,6 +2668,17 @@ print_summary() {
     if [[ $total -gt 0 ]]; then
         local score=$((PASS_COUNT * 100 / total))
         output "Security Score: ${BOLD}${score}%${NC}"
+
+        # Add assessment for beginners
+        if [[ $score -ge 90 ]]; then
+            output "${GREEN}Assessment: Excellent - Your server is well hardened${NC}"
+        elif [[ $score -ge 70 ]]; then
+            output "${YELLOW}Assessment: Good - Minor improvements recommended${NC}"
+        elif [[ $score -ge 50 ]]; then
+            output "${YELLOW}Assessment: Fair - Several security issues need attention${NC}"
+        else
+            output "${RED}Assessment: Poor - Critical security issues found, immediate action required${NC}"
+        fi
     fi
 
     # Write to report
@@ -2054,32 +2697,160 @@ print_summary() {
 
 print_recommendations() {
     if [[ ${#RECOMMENDATIONS[@]} -eq 0 ]]; then
+        output ""
+        output "${GREEN}No security recommendations - your system passed all checks!${NC}"
         return
     fi
 
     output ""
     output "================================"
-    output "${BOLD}Recommended Actions${NC}"
+    output "${BOLD}Recommended Actions (Priority Order)${NC}"
     output "================================"
+    output ""
+    output "${GRAY}Fix these issues in order - CRITICAL items first:${NC}"
+    output ""
+
+    # Sort recommendations by priority
+    local -a critical_recs=()
+    local -a high_recs=()
+    local -a medium_recs=()
+    local -a low_recs=()
+
+    for rec in "${RECOMMENDATIONS[@]}"; do
+        local priority
+        priority=$(get_priority "$rec")
+        case "$priority" in
+            1-*) critical_recs+=("$rec") ;;
+            2-*) high_recs+=("$rec") ;;
+            3-*) medium_recs+=("$rec") ;;
+            *) low_recs+=("$rec") ;;
+        esac
+    done
 
     local i=1
-    for rec in "${RECOMMENDATIONS[@]}"; do
-        output "${YELLOW}$i.${NC} $rec"
-        ((i++))
-    done
+
+    # Print CRITICAL
+    if [[ ${#critical_recs[@]} -gt 0 ]]; then
+        output "${RED}── CRITICAL (Fix Immediately) ──${NC}"
+        for rec in "${critical_recs[@]}"; do
+            output "${RED}$i.${NC} $rec"
+            ((i++))
+        done
+        output ""
+    fi
+
+    # Print HIGH
+    if [[ ${#high_recs[@]} -gt 0 ]]; then
+        output "${YELLOW}── HIGH PRIORITY ──${NC}"
+        for rec in "${high_recs[@]}"; do
+            output "${YELLOW}$i.${NC} $rec"
+            ((i++))
+        done
+        output ""
+    fi
+
+    # Print MEDIUM
+    if [[ ${#medium_recs[@]} -gt 0 ]]; then
+        output "${BLUE}── MEDIUM PRIORITY ──${NC}"
+        for rec in "${medium_recs[@]}"; do
+            output "${BLUE}$i.${NC} $rec"
+            ((i++))
+        done
+        output ""
+    fi
+
+    # Print LOW
+    if [[ ${#low_recs[@]} -gt 0 ]]; then
+        output "${GRAY}── LOW PRIORITY ──${NC}"
+        for rec in "${low_recs[@]}"; do
+            output "${GRAY}$i.${NC} $rec"
+            ((i++))
+        done
+    fi
 
     # Write to report
     {
         echo ""
         echo "================================"
-        echo "RECOMMENDED ACTIONS"
+        echo "RECOMMENDED ACTIONS (PRIORITY ORDER)"
         echo "================================"
+        echo ""
         local j=1
-        for rec in "${RECOMMENDATIONS[@]}"; do
-            echo "$j. $rec"
-            ((j++))
-        done
+
+        if [[ ${#critical_recs[@]} -gt 0 ]]; then
+            echo "── CRITICAL ──"
+            for rec in "${critical_recs[@]}"; do
+                echo "$j. $rec"
+                ((j++))
+            done
+            echo ""
+        fi
+
+        if [[ ${#high_recs[@]} -gt 0 ]]; then
+            echo "── HIGH PRIORITY ──"
+            for rec in "${high_recs[@]}"; do
+                echo "$j. $rec"
+                ((j++))
+            done
+            echo ""
+        fi
+
+        if [[ ${#medium_recs[@]} -gt 0 ]]; then
+            echo "── MEDIUM PRIORITY ──"
+            for rec in "${medium_recs[@]}"; do
+                echo "$j. $rec"
+                ((j++))
+            done
+            echo ""
+        fi
+
+        if [[ ${#low_recs[@]} -gt 0 ]]; then
+            echo "── LOW PRIORITY ──"
+            for rec in "${low_recs[@]}"; do
+                echo "$j. $rec"
+                ((j++))
+            done
+        fi
     } >> "$REPORT_FILE"
+}
+
+# Print quick-start hardening guide for new VPS
+print_quickstart_guide() {
+    output ""
+    output "================================"
+    output "${BOLD}Quick-Start Hardening Guide${NC}"
+    output "================================"
+    output ""
+    output "For a NEW VPS, complete these steps in order:"
+    output ""
+    output "${BOLD}1. Create a non-root user with sudo access:${NC}"
+    output "   adduser yourusername"
+    output "   usermod -aG sudo yourusername"
+    output ""
+    output "${BOLD}2. Set up SSH key authentication:${NC}"
+    output "   ssh-copy-id yourusername@your-server-ip"
+    output ""
+    output "${BOLD}3. Disable root login and password auth:${NC}"
+    output "   Edit /etc/ssh/sshd_config:"
+    output "   PermitRootLogin no"
+    output "   PasswordAuthentication no"
+    output "   systemctl restart sshd"
+    output ""
+    output "${BOLD}4. Enable firewall (only allow SSH):${NC}"
+    output "   ufw default deny incoming"
+    output "   ufw default allow outgoing"
+    output "   ufw allow ssh"
+    output "   ufw enable"
+    output ""
+    output "${BOLD}5. Install and configure fail2ban:${NC}"
+    output "   apt install fail2ban"
+    output "   systemctl enable fail2ban"
+    output ""
+    output "${BOLD}6. Enable automatic security updates:${NC}"
+    output "   apt install unattended-upgrades"
+    output "   dpkg-reconfigure unattended-upgrades"
+    output ""
+    output "${GRAY}Run this script again after completing these steps.${NC}"
 }
 
 # =============================================================================
@@ -2087,11 +2858,23 @@ print_recommendations() {
 # =============================================================================
 
 main() {
+    # Check bash version first
+    check_bash_version
+
     # Parse command line arguments first (before root check for --help)
     parse_args "$@"
 
     # Initialize colors (after parsing args to respect --quiet)
     init_colors
+
+    # Check prerequisites (after colors so we can show warnings)
+    check_prerequisites
+
+    # Show guide if requested
+    if [[ "${CONFIG[show_guide]}" == "true" ]]; then
+        print_quickstart_guide
+        exit 0
+    fi
 
     # Check for dry-run mode
     if [[ "${CONFIG[dry_run]}" == "true" ]]; then
@@ -2119,6 +2902,8 @@ main() {
             "time:Time synchronization check"
             "audit:Audit system check"
             "core:Core dump settings check"
+            "cron:Cron security check"
+            "network:Network protocol and IPv6 checks"
         )
 
         for check in "${checks[@]}"; do
@@ -2234,6 +3019,22 @@ main() {
     check_audit_system
     check_core_dumps
 
+    # Additional production hardening checks (Phase 8)
+    check_ssh_key_permissions
+    check_sgid_files
+    check_cron_security
+    check_dangerous_protocols
+    check_login_banner
+    check_account_lockout
+    check_umask_settings
+    check_log_permissions
+    check_secure_boot
+    check_process_accounting
+    check_ipv6_security
+    check_wireless_interfaces
+    check_usb_storage
+    check_compiler_access
+
     # Print summary
     print_summary
     print_recommendations
@@ -2254,6 +3055,19 @@ main() {
 
     output ""
     output "VPS audit complete. Report saved to: ${BOLD}$REPORT_FILE${NC}"
+
+    # Provide helpful hints for new users
+    if [[ $CRITICAL_FAIL_COUNT -gt 0 ]]; then
+        output ""
+        output "${RED}${BOLD}CRITICAL SECURITY ISSUES FOUND!${NC}"
+        output "Your server has serious security vulnerabilities that need immediate attention."
+        output ""
+        output "For step-by-step hardening guidance, run:"
+        output "  ${BOLD}sudo $0 --guide${NC}"
+    elif [[ $FAIL_COUNT -gt 0 ]]; then
+        output ""
+        output "${YELLOW}Security issues were found. Review the recommendations above.${NC}"
+    fi
 
     # Exit with appropriate code (Issue #42)
     if [[ $CRITICAL_FAIL_COUNT -gt 0 ]]; then
