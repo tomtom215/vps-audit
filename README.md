@@ -4,6 +4,8 @@ A comprehensive Bash script for auditing the security and hardening of your VPS 
 
 **Perfect for new VPS setup** - Run this script right after receiving your server credentials to identify and fix security issues.
 
+> **Fork Notice:** This is an actively maintained fork of [vernu/vps-audit](https://github.com/vernu/vps-audit). Versions 2.1.0+ include additional hardening checks, cross-platform compatibility improvements, and a comprehensive test suite. See [Changelog](#changelog) for details.
+
 ![Sample Output](./screenshot.png)
 
 ## Features
@@ -90,9 +92,9 @@ A comprehensive Bash script for auditing the security and hardening of your VPS 
 1. Download the script:
 
 ```bash
-wget https://raw.githubusercontent.com/vernu/vps-audit/main/vps-audit.sh
+wget https://raw.githubusercontent.com/tomtom215/vps-audit/main/vps-audit.sh
 # or
-curl -O https://raw.githubusercontent.com/vernu/vps-audit/main/vps-audit.sh
+curl -O https://raw.githubusercontent.com/tomtom215/vps-audit/main/vps-audit.sh
 ```
 
 2. Make the script executable:
@@ -387,17 +389,17 @@ Supported test distributions:
 
 ## Changelog
 
-### Version 2.2.0
+### Version 2.2.0 (Fork)
 - Added comprehensive command availability detection with caching
 - Added portable stat wrapper (GNU vs BSD compatibility)
 - Added tool version detection (busybox, GNU coreutils)
-- Added multi-distribution Docker test matrix
+- Added multi-distribution Docker test matrix (12 distros)
 - Added integration test suite (24 tests)
+- Added GitHub Actions CI workflow
 - Improved graceful degradation when optional commands are missing
 - All scripts pass shellcheck with zero warnings
-- Fixed all shellcheck SC2010, SC2155 warnings
 
-### Version 2.1.0
+### Version 2.1.0 (Fork)
 - Added 14 new production hardening checks:
   - SSH key permissions
   - SGID files scanning

@@ -2,7 +2,9 @@
 #
 # VPS Security Audit Tool
 # Version: 2.2.0
-# https://github.com/vernu/vps-audit
+#
+# Fork: https://github.com/tomtom215/vps-audit
+# Original: https://github.com/vernu/vps-audit
 #
 # A comprehensive security and performance auditing tool for Linux VPS systems.
 # Supports: Debian, Ubuntu, RHEL, CentOS, Fedora, Rocky, Alma, Arch, Alpine, openSUSE
@@ -984,7 +986,7 @@ Exit Codes:
     1   One or more checks failed
     2   Critical security issues found
 
-Report bugs to: https://github.com/vernu/vps-audit/issues
+Report bugs to: https://github.com/tomtom215/vps-audit/issues
 EOF
 }
 
@@ -3122,14 +3124,14 @@ main() {
 
     # Print header
     output "${BLUE}${BOLD}VPS Security Audit Tool v${VERSION}${NC}"
-    output "${GRAY}https://github.com/vernu/vps-audit${NC}"
+    output "${GRAY}https://github.com/tomtom215/vps-audit${NC}"
     output "${GRAY}Starting audit at $(date)${NC}"
     output ""
 
     # Write header to report
     {
         echo "VPS Security Audit Tool v${VERSION}"
-        echo "https://github.com/vernu/vps-audit"
+        echo "https://github.com/tomtom215/vps-audit"
         echo "Starting audit at $(date)"
         echo "================================"
         echo ""
