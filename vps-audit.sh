@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # VPS Security Audit Tool
-# Version: 2.0.0
+# Version: 2.2.0
 # https://github.com/vernu/vps-audit
 #
 # A comprehensive security and performance auditing tool for Linux VPS systems.
@@ -21,7 +21,7 @@ set -o pipefail
 set -o noclobber
 
 # Script version for tracking (Issue #33)
-readonly VERSION="2.1.0"
+readonly VERSION="2.2.0"
 
 # Minimum required Bash version
 readonly MIN_BASH_VERSION="4.0"
@@ -242,25 +242,175 @@ check_bash_version() {
 }
 
 # =============================================================================
+# COMMAND AVAILABILITY AND VERSION DETECTION
+# =============================================================================
+
+# Cache for command availability (improves performance)
+declare -A CMD_CACHE=()
+
+# Tool version information
+declare -A TOOL_INFO=(
+    [stat_type]=""          # "gnu" or "bsd"
+    [ss_version]=""         # ss version
+    [iptables_nft]=""       # "true" if iptables uses nftables backend
+    [busybox]=""            # "true" if running in busybox environment
+    [coreutils]=""          # "gnu" or "busybox" or "bsd"
+)
+
+# Fast command availability check with caching
+has_command() {
+    local cmd="$1"
+
+    # Check cache first
+    if [[ -n "${CMD_CACHE[$cmd]+isset}" ]]; then
+        [[ "${CMD_CACHE[$cmd]}" == "1" ]]
+        return
+    fi
+
+    # Check and cache
+    if command -v "$cmd" &>/dev/null; then
+        CMD_CACHE[$cmd]="1"
+        return 0
+    else
+        CMD_CACHE[$cmd]="0"
+        return 1
+    fi
+}
+
+# Detect tool versions and variants
+detect_tool_versions() {
+    # Detect stat variant (GNU vs BSD)
+    if has_command stat; then
+        if stat --version 2>&1 | grep -q "GNU\|coreutils"; then
+            TOOL_INFO[stat_type]="gnu"
+        elif stat -f "%z" / &>/dev/null 2>&1; then
+            TOOL_INFO[stat_type]="bsd"
+        else
+            # Fallback: try GNU syntax first
+            if stat -c '%s' / &>/dev/null 2>&1; then
+                TOOL_INFO[stat_type]="gnu"
+            else
+                TOOL_INFO[stat_type]="bsd"
+            fi
+        fi
+    fi
+
+    # Detect busybox environment
+    # We check --help/--version output to detect coreutils implementation
+    local is_busybox=false
+    local is_gnu=false
+
+    if has_command busybox; then
+        is_busybox=true
+    elif has_command ls; then
+        local ls_help
+        ls_help=$(ls --help 2>&1 || true)
+        if [[ "$ls_help" == *"BusyBox"* ]]; then
+            is_busybox=true
+        fi
+        local ls_version
+        ls_version=$(ls --version 2>&1 || true)
+        if [[ "$ls_version" == *"GNU"* ]] || [[ "$ls_version" == *"coreutils"* ]]; then
+            is_gnu=true
+        fi
+    fi
+
+    if [[ "$is_busybox" == "true" ]]; then
+        TOOL_INFO[busybox]="true"
+        TOOL_INFO[coreutils]="busybox"
+    elif [[ "$is_gnu" == "true" ]]; then
+        TOOL_INFO[coreutils]="gnu"
+    else
+        TOOL_INFO[coreutils]="unknown"
+    fi
+
+    # Detect iptables backend (legacy vs nftables)
+    if has_command iptables; then
+        if iptables --version 2>&1 | grep -q "nf_tables"; then
+            TOOL_INFO[iptables_nft]="true"
+        else
+            TOOL_INFO[iptables_nft]="false"
+        fi
+    fi
+
+    # Get ss version if available
+    if has_command ss; then
+        TOOL_INFO[ss_version]=$(ss --version 2>&1 | head -1 || echo "unknown")
+    fi
+
+    log_debug "Tool detection: stat=${TOOL_INFO[stat_type]}, coreutils=${TOOL_INFO[coreutils]}, busybox=${TOOL_INFO[busybox]:-false}"
+}
+
+# =============================================================================
+# PORTABLE STAT WRAPPER
+# =============================================================================
+
+# Portable stat wrapper that works on GNU and BSD systems
+portable_stat() {
+    local format="$1"
+    local file="$2"
+
+    if [[ ! -e "$file" ]]; then
+        echo ""
+        return 1
+    fi
+
+    case "${TOOL_INFO[stat_type]}" in
+        gnu)
+            case "$format" in
+                uid)   stat -c '%u' "$file" 2>/dev/null ;;
+                gid)   stat -c '%g' "$file" 2>/dev/null ;;
+                mode)  stat -c '%a' "$file" 2>/dev/null ;;
+                size)  stat -c '%s' "$file" 2>/dev/null ;;
+                owner) stat -c '%U' "$file" 2>/dev/null ;;
+                group) stat -c '%G' "$file" 2>/dev/null ;;
+            esac
+            ;;
+        bsd)
+            case "$format" in
+                uid)   stat -f '%u' "$file" 2>/dev/null ;;
+                gid)   stat -f '%g' "$file" 2>/dev/null ;;
+                mode)  stat -f '%Lp' "$file" 2>/dev/null ;;
+                size)  stat -f '%z' "$file" 2>/dev/null ;;
+                owner) stat -f '%Su' "$file" 2>/dev/null ;;
+                group) stat -f '%Sg' "$file" 2>/dev/null ;;
+            esac
+            ;;
+        *)
+            # Fallback: try GNU first, then BSD
+            case "$format" in
+                uid)   stat -c '%u' "$file" 2>/dev/null || stat -f '%u' "$file" 2>/dev/null ;;
+                gid)   stat -c '%g' "$file" 2>/dev/null || stat -f '%g' "$file" 2>/dev/null ;;
+                mode)  stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null ;;
+                size)  stat -c '%s' "$file" 2>/dev/null || stat -f '%z' "$file" 2>/dev/null ;;
+                owner) stat -c '%U' "$file" 2>/dev/null || stat -f '%Su' "$file" 2>/dev/null ;;
+                group) stat -c '%G' "$file" 2>/dev/null || stat -f '%Sg' "$file" 2>/dev/null ;;
+            esac
+            ;;
+    esac
+}
+
+# =============================================================================
 # PREREQUISITES CHECK
 # =============================================================================
 
 check_prerequisites() {
     local missing_required=()
     local missing_recommended=()
+    local warnings=()
 
-    # Required commands
+    # Required commands - these are essential
     local required_cmds=("grep" "awk" "sed" "cut" "find" "stat" "mktemp" "hostname" "uname" "date")
     for cmd in "${required_cmds[@]}"; do
-        if ! command -v "$cmd" &>/dev/null; then
+        if ! has_command "$cmd"; then
             missing_required+=("$cmd")
         fi
     done
 
-    # Recommended commands
-    local recommended_cmds=("curl" "ss" "sysctl" "journalctl")
+    # Recommended commands - script works without but with reduced functionality
+    local recommended_cmds=("curl" "ss" "sysctl" "journalctl" "df" "free" "ip")
     for cmd in "${recommended_cmds[@]}"; do
-        if ! command -v "$cmd" &>/dev/null; then
+        if ! has_command "$cmd"; then
             missing_recommended+=("$cmd")
         fi
     done
@@ -268,12 +418,31 @@ check_prerequisites() {
     if [[ ${#missing_required[@]} -gt 0 ]]; then
         echo "ERROR: Missing required commands: ${missing_required[*]}" >&2
         echo "Please install the required packages and try again." >&2
+        echo "" >&2
+        echo "Installation hints:" >&2
+        echo "  Debian/Ubuntu: apt install coreutils findutils grep gawk sed hostname" >&2
+        echo "  RHEL/CentOS:   yum install coreutils findutils grep gawk sed hostname" >&2
+        echo "  Alpine:        apk add coreutils findutils grep gawk sed" >&2
         exit 1
     fi
 
-    if [[ ${#missing_recommended[@]} -gt 0 ]] && [[ "${CONFIG[quiet]}" != "true" ]]; then
-        echo -e "${YELLOW}[INFO]${NC} Some recommended commands are missing: ${missing_recommended[*]}" >&2
-        echo -e "${YELLOW}[INFO]${NC} Some checks may be skipped or produce limited results." >&2
+    # Detect tool versions and variants
+    detect_tool_versions
+
+    # Warn about busybox limitations
+    if [[ "${TOOL_INFO[busybox]}" == "true" ]]; then
+        warnings+=("Running in BusyBox environment - some checks may have limited functionality")
+    fi
+
+    if [[ ${#missing_recommended[@]} -gt 0 ]]; then
+        warnings+=("Missing optional commands (${missing_recommended[*]}) - some checks may be skipped")
+    fi
+
+    # Print warnings if not in quiet mode
+    if [[ ${#warnings[@]} -gt 0 ]] && [[ "${CONFIG[quiet]}" != "true" ]]; then
+        for warn in "${warnings[@]}"; do
+            echo -e "${YELLOW}[INFO]${NC} $warn" >&2
+        done
     fi
 }
 
@@ -964,8 +1133,14 @@ load_config() {
         if [[ -f "$config_file" ]] && [[ -r "$config_file" ]]; then
             # Security check: verify file ownership and permissions
             local file_owner file_perms
-            file_owner=$(stat -c '%u' "$config_file" 2>/dev/null || stat -f '%u' "$config_file" 2>/dev/null)
-            file_perms=$(stat -c '%a' "$config_file" 2>/dev/null || stat -f '%Lp' "$config_file" 2>/dev/null)
+            file_owner=$(portable_stat uid "$config_file")
+            file_perms=$(portable_stat mode "$config_file")
+
+            # Skip if we couldn't get file info
+            if [[ -z "$file_owner" ]] || [[ -z "$file_perms" ]]; then
+                log_warning "Ignoring config file $config_file - could not verify ownership/permissions"
+                continue
+            fi
 
             # Config file must be owned by root or current user
             if [[ "$file_owner" != "0" ]] && [[ "$file_owner" != "$EUID" ]]; then
@@ -2131,16 +2306,16 @@ check_ssh_key_permissions() {
     # Check root SSH directory
     if [[ -d /root/.ssh ]]; then
         local root_ssh_perms
-        root_ssh_perms=$(stat -c '%a' /root/.ssh 2>/dev/null || stat -f '%Lp' /root/.ssh 2>/dev/null)
-        if [[ "$root_ssh_perms" != "700" ]]; then
+        root_ssh_perms=$(portable_stat mode /root/.ssh)
+        if [[ -n "$root_ssh_perms" ]] && [[ "$root_ssh_perms" != "700" ]]; then
             issues+=("/root/.ssh has insecure permissions: $root_ssh_perms (should be 700)")
         fi
 
         # Check authorized_keys
         if [[ -f /root/.ssh/authorized_keys ]]; then
             local auth_perms
-            auth_perms=$(stat -c '%a' /root/.ssh/authorized_keys 2>/dev/null || stat -f '%Lp' /root/.ssh/authorized_keys 2>/dev/null)
-            if [[ "$auth_perms" != "600" ]] && [[ "$auth_perms" != "644" ]]; then
+            auth_perms=$(portable_stat mode /root/.ssh/authorized_keys)
+            if [[ -n "$auth_perms" ]] && [[ "$auth_perms" != "600" ]] && [[ "$auth_perms" != "644" ]]; then
                 issues+=("/root/.ssh/authorized_keys has insecure permissions: $auth_perms")
             fi
         fi
@@ -2152,8 +2327,8 @@ check_ssh_key_permissions() {
         [[ ! -d "$homedir/.ssh" ]] && continue
 
         local ssh_perms
-        ssh_perms=$(stat -c '%a' "$homedir/.ssh" 2>/dev/null || stat -f '%Lp' "$homedir/.ssh" 2>/dev/null)
-        if [[ "$ssh_perms" != "700" ]]; then
+        ssh_perms=$(portable_stat mode "$homedir/.ssh")
+        if [[ -n "$ssh_perms" ]] && [[ "$ssh_perms" != "700" ]]; then
             issues+=("$homedir/.ssh has insecure permissions: $ssh_perms")
         fi
     done < /etc/passwd
@@ -2229,8 +2404,8 @@ check_cron_security() {
     for crondir in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly; do
         if [[ -d "$crondir" ]]; then
             local perms
-            perms=$(stat -c '%a' "$crondir" 2>/dev/null || stat -f '%Lp' "$crondir" 2>/dev/null)
-            if [[ "${perms: -1}" =~ [2367] ]]; then
+            perms=$(portable_stat mode "$crondir")
+            if [[ -n "$perms" ]] && [[ "${perms: -1}" =~ [2367] ]]; then
                 issues+=("$crondir is world-writable")
             fi
         fi
@@ -2239,8 +2414,8 @@ check_cron_security() {
     # Check for world-readable crontabs with sensitive content
     if [[ -d /var/spool/cron/crontabs ]]; then
         local perms
-        perms=$(stat -c '%a' /var/spool/cron/crontabs 2>/dev/null || stat -f '%Lp' /var/spool/cron/crontabs 2>/dev/null)
-        if [[ "$perms" != "700" ]] && [[ "$perms" != "1730" ]]; then
+        perms=$(portable_stat mode /var/spool/cron/crontabs)
+        if [[ -n "$perms" ]] && [[ "$perms" != "700" ]] && [[ "$perms" != "1730" ]]; then
             issues+=("/var/spool/cron/crontabs has weak permissions: $perms")
         fi
     fi
@@ -2393,10 +2568,10 @@ check_log_permissions() {
     for logfile in "${log_files[@]}"; do
         if [[ -f "$logfile" ]]; then
             local perms
-            perms=$(stat -c '%a' "$logfile" 2>/dev/null || stat -f '%Lp' "$logfile" 2>/dev/null)
+            perms=$(portable_stat mode "$logfile")
 
             # Log files should not be world-readable for sensitive logs
-            if [[ "${perms: -1}" =~ [4567] ]]; then
+            if [[ -n "$perms" ]] && [[ "${perms: -1}" =~ [4567] ]]; then
                 issues+=("$logfile is world-readable")
             fi
         fi
@@ -2405,8 +2580,8 @@ check_log_permissions() {
     # Check /var/log directory itself
     if [[ -d /var/log ]]; then
         local log_perms
-        log_perms=$(stat -c '%a' /var/log 2>/dev/null || stat -f '%Lp' /var/log 2>/dev/null)
-        if [[ "${log_perms: -1}" =~ [2367] ]]; then
+        log_perms=$(portable_stat mode /var/log)
+        if [[ -n "$log_perms" ]] && [[ "${log_perms: -1}" =~ [2367] ]]; then
             issues+=("/var/log is world-writable")
         fi
     fi

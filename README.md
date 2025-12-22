@@ -224,7 +224,7 @@ Machine-readable format for integration with monitoring tools:
 
 ```json
 {
-  "version": "2.1.0",
+  "version": "2.2.0",
   "timestamp": "2025-01-15T10:30:00+00:00",
   "hostname": "myserver",
   "os": "Ubuntu 24.04 LTS",
@@ -348,7 +348,54 @@ Feel free to submit issues and enhancement requests!
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
+## Testing
+
+This project includes a comprehensive test suite to ensure reliability across different Linux distributions.
+
+### Running Integration Tests
+
+```bash
+# Run integration tests
+./tests/integration-tests.sh
+```
+
+### Multi-Distribution Testing (Docker)
+
+Test the script across multiple distributions using Docker:
+
+```bash
+# Test all supported distributions
+./test-matrix.sh
+
+# Test specific distributions
+./test-matrix.sh ubuntu debian
+./test-matrix.sh alpine
+
+# List available distributions
+./test-matrix.sh -l
+```
+
+Supported test distributions:
+- Ubuntu 22.04, 24.04
+- Debian 11, 12
+- Rocky Linux 9
+- AlmaLinux 9
+- Fedora 39, 40
+- Alpine 3.19, 3.20
+- Arch Linux
+- openSUSE Leap 15.5
+
 ## Changelog
+
+### Version 2.2.0
+- Added comprehensive command availability detection with caching
+- Added portable stat wrapper (GNU vs BSD compatibility)
+- Added tool version detection (busybox, GNU coreutils)
+- Added multi-distribution Docker test matrix
+- Added integration test suite (24 tests)
+- Improved graceful degradation when optional commands are missing
+- All scripts pass shellcheck with zero warnings
+- Fixed all shellcheck SC2010, SC2155 warnings
 
 ### Version 2.1.0
 - Added 14 new production hardening checks:
