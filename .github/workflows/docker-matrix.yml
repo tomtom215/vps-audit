@@ -26,6 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Sanitize artifact name
+        id: sanitize
+        run: |
+          # Replace invalid characters (: and /) with dashes for artifact names
+          SAFE_NAME=$(echo "${{ matrix.distro }}" | tr ':/' '--')
+          echo "artifact_name=${SAFE_NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Test on ${{ matrix.distro }}
         run: ./test-matrix.sh "${{ matrix.distro }}"
 
@@ -33,7 +40,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results-${{ matrix.distro }}
+          name: test-results-${{ steps.sanitize.outputs.artifact_name }}
           path: test-results/
           retention-days: 7
 
