@@ -163,6 +163,7 @@ clear_progress() {
 # CLEANUP & TRAP HANDLERS (Issue #21)
 # =============================================================================
 
+# shellcheck disable=SC2317  # Invoked indirectly via trap
 cleanup() {
     local exit_code=$?
 
@@ -175,7 +176,7 @@ cleanup() {
         fi
     fi
 
-    exit $exit_code
+    exit "$exit_code"
 }
 
 trap cleanup EXIT INT TERM
@@ -189,12 +190,14 @@ is_numeric() {
     [[ "$value" =~ ^[0-9]+$ ]]
 }
 
+# shellcheck disable=SC2317  # Called from parse_args
 validate_percentage() {
     local value="$1"
     is_numeric "$value" && [[ $value -ge 0 ]] && [[ $value -le 100 ]]
 }
 
 # Safe command execution with error handling (Issue #45)
+# shellcheck disable=SC2317  # Called dynamically
 safe_exec() {
     local cmd="$1"
     local default="${2:-}"
@@ -518,7 +521,7 @@ get_running_services_count() {
             count=$(service --status-all 2>/dev/null | grep -c " + " || echo 0)
             ;;
         runit)
-            count=$(ls /var/service 2>/dev/null | wc -l || echo 0)
+            count=$(find /var/service -maxdepth 1 -type l 2>/dev/null | wc -l || echo 0)
             ;;
         *)
             log_warning "Cannot count services for unknown service manager"
@@ -1491,7 +1494,8 @@ check_open_ports() {
             127.0.0.1|::1|\[::1\]|localhost)
                 localhost_ports[$port]=1
                 ;;
-            0.0.0.0|*|\[::\]|::)
+            0.0.0.0|\[::\]|::|\[::ffff:0.0.0.0\])
+                # All-zeros addresses mean listening on all interfaces (public)
                 public_ports[$port]=1
                 ;;
             *)
@@ -1865,7 +1869,6 @@ check_system_restart() {
 check_mac_status() {
     should_run_check "mac" || return 0
 
-    local mac_system=""
     local mac_status=""
 
     # Check SELinux
@@ -1883,7 +1886,7 @@ check_mac_status() {
                 return
                 ;;
             Disabled)
-                mac_system="SELinux (disabled)"
+                # SELinux disabled - continue to check AppArmor
                 ;;
         esac
     fi
@@ -2144,7 +2147,7 @@ check_ssh_key_permissions() {
     fi
 
     # Check user SSH directories
-    while IFS=: read -r username _ uid _ _ homedir _; do
+    while IFS=: read -r _username _ uid _ _ homedir _; do
         [[ $uid -lt 1000 ]] && continue
         [[ ! -d "$homedir/.ssh" ]] && continue
 
@@ -2299,8 +2302,8 @@ check_login_banner() {
     if [[ -f /etc/issue ]] && [[ -s /etc/issue ]]; then
         local issue_content
         issue_content=$(cat /etc/issue)
-        # Check it's not just default content
-        if [[ ! "$issue_content" =~ "Ubuntu\|Debian\|CentOS\|Red Hat\|\\\\n\|\\\\l" ]]; then
+        # Check it's not just default content (OS name or escape sequences)
+        if [[ ! "$issue_content" =~ (Ubuntu|Debian|CentOS|Red\ Hat|\\\\n|\\\\l) ]]; then
             has_banner=true
         fi
     fi
@@ -2389,9 +2392,8 @@ check_log_permissions() {
 
     for logfile in "${log_files[@]}"; do
         if [[ -f "$logfile" ]]; then
-            local perms owner
+            local perms
             perms=$(stat -c '%a' "$logfile" 2>/dev/null || stat -f '%Lp' "$logfile" 2>/dev/null)
-            owner=$(stat -c '%U' "$logfile" 2>/dev/null || stat -f '%Su' "$logfile" 2>/dev/null)
 
             # Log files should not be world-readable for sensitive logs
             if [[ "${perms: -1}" =~ [4567] ]]; then
@@ -2426,15 +2428,19 @@ check_secure_boot() {
     # Check if running UEFI
     if [[ -d /sys/firmware/efi ]]; then
         # Check SecureBoot status
-        if [[ -f /sys/firmware/efi/efivars/SecureBoot-* ]] 2>/dev/null; then
-            local sb_value
-            sb_value=$(od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | awk '{print $NF}')
-            if [[ "$sb_value" == "1" ]]; then
-                secure_boot_status="enabled"
-            else
-                secure_boot_status="disabled"
+        local sb_file
+        for sb_file in /sys/firmware/efi/efivars/SecureBoot-*; do
+            if [[ -f "$sb_file" ]]; then
+                local sb_value
+                sb_value=$(od -An -t u1 "$sb_file" 2>/dev/null | awk '{print $NF}')
+                if [[ "$sb_value" == "1" ]]; then
+                    secure_boot_status="enabled"
+                else
+                    secure_boot_status="disabled"
+                fi
+                break
             fi
-        fi
+        done
 
         # Alternative check via mokutil
         if command -v mokutil &>/dev/null; then
