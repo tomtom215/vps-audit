@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_docker_tests:
+        description: 'Run full Docker matrix tests'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run bash syntax check
+        run: |
+          bash -n vps-audit.sh
+          bash -n test-matrix.sh
+          bash -n tests/integration-tests.sh
+
+      - name: Run shellcheck
+        run: |
+          shellcheck -x -S warning vps-audit.sh
+          shellcheck -x -S warning test-matrix.sh
+          shellcheck -x -S warning tests/integration-tests.sh
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run integration tests
+        run: ./tests/integration-tests.sh
+
+  docker-matrix:
+    name: Docker Matrix - ${{ matrix.distro }}
+    runs-on: ubuntu-latest
+    needs: lint
+    if: ${{ inputs.run_docker_tests }}
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - debian:11
+          - debian:12
+          - rockylinux:9
+          - almalinux:9
+          - fedora:39
+          - fedora:40
+          - alpine:3.19
+          - alpine:3.20
+          - archlinux:latest
+          - opensuse/leap:15.5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test on ${{ matrix.distro }}
+        run: ./test-matrix.sh "${{ matrix.distro }}"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.distro }}
+          path: test-results/
+          retention-days: 7
+
+  summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [integration-tests, docker-matrix]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          echo "## Test Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.integration-tests.result }}" == "success" ]; then
+            echo "✅ Integration tests passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Integration tests failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${{ needs.docker-matrix.result }}" == "success" ]; then
+            echo "✅ Docker matrix tests passed" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.docker-matrix.result }}" == "skipped" ]; then
+            echo "⏭️ Docker matrix tests skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Docker matrix tests failed" >> $GITHUB_STEP_SUMMARY
+          fi
