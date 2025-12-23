@@ -19,7 +19,7 @@ jobs:
       - name: Run bash syntax check
         id: syntax
         run: |
-          echo "### 🔍 Bash Syntax Check" >> $GITHUB_STEP_SUMMARY
+          echo "### Bash Syntax Check" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| File | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
@@ -28,9 +28,9 @@ jobs:
 
           for script in vps-audit.sh test-matrix.sh tests/integration-tests.sh; do
             if bash -n "$script" 2>/dev/null; then
-              echo "| \`$script\` | ✅ Valid |" >> $GITHUB_STEP_SUMMARY
+              echo "| \`$script\` | PASS |" >> $GITHUB_STEP_SUMMARY
             else
-              echo "| \`$script\` | ❌ Invalid |" >> $GITHUB_STEP_SUMMARY
+              echo "| \`$script\` | FAIL |" >> $GITHUB_STEP_SUMMARY
               SYNTAX_FAILED=1
             fi
           done
@@ -38,10 +38,10 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ $SYNTAX_FAILED -eq 1 ]; then
-            echo "❌ **Syntax check failed**" >> $GITHUB_STEP_SUMMARY
+            echo "**[FAIL] Syntax check failed**" >> $GITHUB_STEP_SUMMARY
             exit 1
           else
-            echo "✅ **All syntax checks passed**" >> $GITHUB_STEP_SUMMARY
+            echo "**[PASS] All syntax checks passed**" >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Run shellcheck
@@ -50,7 +50,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🔬 ShellCheck Static Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "### ShellCheck Static Analysis" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           SHELLCHECK_FAILED=0
@@ -68,7 +68,7 @@ jobs:
             set -e
 
             if [ -z "$SC_OUTPUT" ]; then
-              echo "✅ No issues found" >> $GITHUB_STEP_SUMMARY
+              echo "[PASS] No issues found" >> $GITHUB_STEP_SUMMARY
             else
               # Count issues
               WARNINGS=$(echo "$SC_OUTPUT" | grep -c ":warning:" || true)
@@ -77,10 +77,10 @@ jobs:
               TOTAL_ERRORS=$((TOTAL_ERRORS + ERRORS))
 
               if [ "$ERRORS" -gt 0 ]; then
-                echo "❌ Found $ERRORS error(s) and $WARNINGS warning(s)" >> $GITHUB_STEP_SUMMARY
+                echo "[FAIL] Found $ERRORS error(s) and $WARNINGS warning(s)" >> $GITHUB_STEP_SUMMARY
                 SHELLCHECK_FAILED=1
               elif [ "$WARNINGS" -gt 0 ]; then
-                echo "⚠️ Found $WARNINGS warning(s)" >> $GITHUB_STEP_SUMMARY
+                echo "[WARN] Found $WARNINGS warning(s)" >> $GITHUB_STEP_SUMMARY
                 SHELLCHECK_FAILED=1
               fi
 
@@ -99,7 +99,7 @@ jobs:
           # Summary
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📊 Lint Summary" >> $GITHUB_STEP_SUMMARY
+          echo "### Lint Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
@@ -109,10 +109,10 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ $SHELLCHECK_FAILED -eq 1 ]; then
-            echo "❌ **ShellCheck found issues that need attention**" >> $GITHUB_STEP_SUMMARY
+            echo "**[FAIL] ShellCheck found issues that need attention**" >> $GITHUB_STEP_SUMMARY
             exit 1
           else
-            echo "✅ **All ShellCheck checks passed**" >> $GITHUB_STEP_SUMMARY
+            echo "**[PASS] All ShellCheck checks passed**" >> $GITHUB_STEP_SUMMARY
           fi
 
   integration-tests:
@@ -125,7 +125,7 @@ jobs:
       - name: Run integration tests
         id: integration
         run: |
-          echo "## 🧪 Integration Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "## Integration Test Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Started:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -151,201 +151,201 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Basic Tests
-          echo "#### 📋 Basic Tests" >> $GITHUB_STEP_SUMMARY
+          echo "#### Basic Tests" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
 
           if echo "$TEST_OUTPUT" | grep -q "Script exists.*PASS"; then
-            echo "| Script exists | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Script exists | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "Script exists.*FAIL"; then
-            echo "| Script exists | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Script exists | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "Script is executable.*PASS"; then
-            echo "| Script is executable | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Script is executable | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "Script is executable.*FAIL"; then
-            echo "| Script is executable | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Script is executable | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "Bash syntax check.*PASS"; then
-            echo "| Bash syntax check | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Bash syntax check | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "Bash syntax check.*FAIL"; then
-            echo "| Bash syntax check | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Bash syntax check | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Command Line Options
-          echo "#### ⚙️ Command Line Options" >> $GITHUB_STEP_SUMMARY
+          echo "#### Command Line Options" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
 
           if echo "$TEST_OUTPUT" | grep -q "\-\-help option.*PASS"; then
-            echo "| --help option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --help option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "\-\-help option.*FAIL"; then
-            echo "| --help option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --help option | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "\-\-version option.*PASS"; then
-            echo "| --version option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --version option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "\-\-version option.*FAIL"; then
-            echo "| --version option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --version option | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "\-\-guide option.*PASS"; then
-            echo "| --guide option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --guide option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "\-\-guide option.*FAIL"; then
-            echo "| --guide option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --guide option | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "\-\-dry-run option.*PASS"; then
-            echo "| --dry-run option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --dry-run option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "\-\-dry-run option.*FAIL"; then
-            echo "| --dry-run option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --dry-run option | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "Invalid option handling.*PASS"; then
-            echo "| Invalid option handling | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Invalid option handling | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "Invalid option handling.*FAIL"; then
-            echo "| Invalid option handling | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Invalid option handling | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "\-\-checks filter.*PASS"; then
-            echo "| --checks filter | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --checks filter | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "\-\-checks filter.*FAIL"; then
-            echo "| --checks filter | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --checks filter | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "Quiet mode with help.*PASS"; then
-            echo "| Quiet mode with help | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Quiet mode with help | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "Quiet mode with help.*FAIL"; then
-            echo "| Quiet mode with help | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Quiet mode with help | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Function Tests
-          echo "#### 🔧 Function Tests" >> $GITHUB_STEP_SUMMARY
+          echo "#### Function Tests" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
 
           if echo "$TEST_OUTPUT" | grep -q "is_numeric function.*PASS"; then
-            echo "| is_numeric function | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| is_numeric function | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "is_numeric function.*FAIL"; then
-            echo "| is_numeric function | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| is_numeric function | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "JSON escaping.*PASS"; then
-            echo "| JSON escaping | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| JSON escaping | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "JSON escaping.*FAIL"; then
-            echo "| JSON escaping | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| JSON escaping | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "portable_stat function.*PASS"; then
-            echo "| portable_stat function | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| portable_stat function | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "portable_stat function.*FAIL"; then
-            echo "| portable_stat function | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| portable_stat function | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "has_command function.*PASS"; then
-            echo "| has_command function | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| has_command function | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "has_command function.*FAIL"; then
-            echo "| has_command function | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| has_command function | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "TOOL_INFO array.*PASS"; then
-            echo "| TOOL_INFO array | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| TOOL_INFO array | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "TOOL_INFO array.*FAIL"; then
-            echo "| TOOL_INFO array | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| TOOL_INFO array | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Output Format Tests
-          echo "#### 📄 Output Format Tests" >> $GITHUB_STEP_SUMMARY
+          echo "#### Output Format Tests" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
 
           if echo "$TEST_OUTPUT" | grep -q "Text output format.*PASS"; then
-            echo "| Text output format | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Text output format | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "Text output format.*FAIL"; then
-            echo "| Text output format | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Text output format | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "JSON output format.*PASS"; then
-            echo "| JSON output format | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| JSON output format | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "JSON output format.*FAIL"; then
-            echo "| JSON output format | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| JSON output format | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Threshold Option Tests
-          echo "#### 📏 Threshold Option Tests" >> $GITHUB_STEP_SUMMARY
+          echo "#### Threshold Option Tests" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
 
           if echo "$TEST_OUTPUT" | grep -q "disk-warn threshold.*PASS"; then
-            echo "| disk-warn threshold | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| disk-warn threshold | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "disk-warn threshold.*FAIL"; then
-            echo "| disk-warn threshold | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| disk-warn threshold | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "mem-warn threshold.*PASS"; then
-            echo "| mem-warn threshold | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| mem-warn threshold | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "mem-warn threshold.*FAIL"; then
-            echo "| mem-warn threshold | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| mem-warn threshold | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "login-warn threshold.*PASS"; then
-            echo "| login-warn threshold | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| login-warn threshold | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "login-warn threshold.*FAIL"; then
-            echo "| login-warn threshold | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| login-warn threshold | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "Invalid threshold handling.*PASS"; then
-            echo "| Invalid threshold handling | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Invalid threshold handling | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "Invalid threshold handling.*FAIL"; then
-            echo "| Invalid threshold handling | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Invalid threshold handling | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Skip Option Tests
-          echo "#### ⏭️ Skip Option Tests" >> $GITHUB_STEP_SUMMARY
+          echo "#### Skip Option Tests" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
 
           if echo "$TEST_OUTPUT" | grep -q "\-\-no-network option.*PASS"; then
-            echo "| --no-network option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --no-network option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "\-\-no-network option.*FAIL"; then
-            echo "| --no-network option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --no-network option | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "\-\-no-suid option.*PASS"; then
-            echo "| --no-suid option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --no-suid option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "\-\-no-suid option.*FAIL"; then
-            echo "| --no-suid option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --no-suid option | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Error Handling Tests
-          echo "#### 🛡️ Error Handling Tests" >> $GITHUB_STEP_SUMMARY
+          echo "#### Error Handling Tests" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
 
           if echo "$TEST_OUTPUT" | grep -q "Missing output directory.*PASS"; then
-            echo "| Missing output directory | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Missing output directory | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "Missing output directory.*FAIL"; then
-            echo "| Missing output directory | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Missing output directory | FAIL |" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -353,7 +353,7 @@ jobs:
           # Extract summary from test output
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📊 Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Extract pass/fail counts
@@ -364,8 +364,8 @@ jobs:
           echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Total Tests | $TOTAL |" >> $GITHUB_STEP_SUMMARY
-          echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
-          echo "| ❌ Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "| Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ "$TOTAL" -gt 0 ] 2>/dev/null; then
@@ -379,12 +379,16 @@ jobs:
 
           # Overall result
           if [ $TEST_EXIT -eq 0 ]; then
-            echo "## ✅ All Integration Tests Passed" >> $GITHUB_STEP_SUMMARY
+            echo "## Result: PASSED" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All integration tests passed." >> $GITHUB_STEP_SUMMARY
           else
-            echo "## ❌ Some Integration Tests Failed" >> $GITHUB_STEP_SUMMARY
+            echo "## Result: FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Some integration tests failed." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "<details>" >> $GITHUB_STEP_SUMMARY
-            echo "<summary>📋 Full Test Output (click to expand)</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "<summary>Full Test Output (click to expand)</summary>" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             echo "$TEST_OUTPUT" >> $GITHUB_STEP_SUMMARY
@@ -401,7 +405,7 @@ jobs:
     steps:
       - name: Generate CI summary
         run: |
-          echo "# 🔄 CI Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "# CI Pipeline Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
@@ -412,23 +416,23 @@ jobs:
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "## 📋 Job Results" >> $GITHUB_STEP_SUMMARY
+          echo "## Job Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
 
           case "${{ needs.lint.result }}" in
-            success) echo "| Lint & Syntax Check | ✅ Passed |" >> $GITHUB_STEP_SUMMARY ;;
-            failure) echo "| Lint & Syntax Check | ❌ Failed |" >> $GITHUB_STEP_SUMMARY ;;
-            cancelled) echo "| Lint & Syntax Check | ⚪ Cancelled |" >> $GITHUB_STEP_SUMMARY ;;
-            skipped) echo "| Lint & Syntax Check | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY ;;
+            success) echo "| Lint & Syntax Check | PASS |" >> $GITHUB_STEP_SUMMARY ;;
+            failure) echo "| Lint & Syntax Check | FAIL |" >> $GITHUB_STEP_SUMMARY ;;
+            cancelled) echo "| Lint & Syntax Check | CANCELLED |" >> $GITHUB_STEP_SUMMARY ;;
+            skipped) echo "| Lint & Syntax Check | SKIP |" >> $GITHUB_STEP_SUMMARY ;;
           esac
 
           case "${{ needs.integration-tests.result }}" in
-            success) echo "| Integration Tests | ✅ Passed |" >> $GITHUB_STEP_SUMMARY ;;
-            failure) echo "| Integration Tests | ❌ Failed |" >> $GITHUB_STEP_SUMMARY ;;
-            cancelled) echo "| Integration Tests | ⚪ Cancelled |" >> $GITHUB_STEP_SUMMARY ;;
-            skipped) echo "| Integration Tests | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY ;;
+            success) echo "| Integration Tests | PASS |" >> $GITHUB_STEP_SUMMARY ;;
+            failure) echo "| Integration Tests | FAIL |" >> $GITHUB_STEP_SUMMARY ;;
+            cancelled) echo "| Integration Tests | CANCELLED |" >> $GITHUB_STEP_SUMMARY ;;
+            skipped) echo "| Integration Tests | SKIP |" >> $GITHUB_STEP_SUMMARY ;;
           esac
 
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -437,11 +441,11 @@ jobs:
 
           # Overall result
           if [ "${{ needs.lint.result }}" == "success" ] && [ "${{ needs.integration-tests.result }}" == "success" ]; then
-            echo "## ✅ CI Pipeline: PASSED" >> $GITHUB_STEP_SUMMARY
+            echo "## Overall Result: PASSED" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "All checks completed successfully. Ready for merge!" >> $GITHUB_STEP_SUMMARY
+            echo "All checks completed successfully. Ready for merge." >> $GITHUB_STEP_SUMMARY
           else
-            echo "## ❌ CI Pipeline: FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "## Overall Result: FAILED" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Some checks failed. Please review the job logs above for details." >> $GITHUB_STEP_SUMMARY
             exit 1

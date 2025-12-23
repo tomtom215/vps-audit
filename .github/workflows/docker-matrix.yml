@@ -53,16 +53,16 @@ jobs:
       - name: Pull Docker image
         id: pull
         run: |
-          echo "### 🐳 Docker Image Pull" >> $GITHUB_STEP_SUMMARY
+          echo "### Docker Image Pull" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           START_TIME=$(date +%s)
           if docker pull "${{ matrix.distro }}" > /dev/null 2>&1; then
             END_TIME=$(date +%s)
             DURATION=$((END_TIME - START_TIME))
-            echo "✅ Successfully pulled \`${{ matrix.distro }}\` in ${DURATION}s" >> $GITHUB_STEP_SUMMARY
+            echo "[PASS] Successfully pulled \`${{ matrix.distro }}\` in ${DURATION}s" >> $GITHUB_STEP_SUMMARY
             echo "pull_success=true" >> "$GITHUB_OUTPUT"
           else
-            echo "❌ Failed to pull \`${{ matrix.distro }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "[FAIL] Failed to pull \`${{ matrix.distro }}\`" >> $GITHUB_STEP_SUMMARY
             echo "pull_success=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
@@ -72,7 +72,7 @@ jobs:
         id: test
         if: steps.pull.outputs.pull_success == 'true'
         run: |
-          echo "### 🧪 Test Execution" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Execution" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Distribution:** \`${{ matrix.distro }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Started:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
@@ -100,61 +100,61 @@ jobs:
 
           # Extract test results
           if echo "$TEST_OUTPUT" | grep -q "SYNTAX: PASS"; then
-            echo "| Bash Syntax Check | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Bash Syntax Check | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "SYNTAX: FAIL"; then
-            echo "| Bash Syntax Check | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Bash Syntax Check | FAIL |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| Bash Syntax Check | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+            echo "| Bash Syntax Check | SKIP |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "HELP: PASS"; then
-            echo "| --help Option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --help Option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "HELP: FAIL"; then
-            echo "| --help Option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --help Option | FAIL |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| --help Option | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+            echo "| --help Option | SKIP |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "VERSION: PASS"; then
-            echo "| --version Option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --version Option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "VERSION: FAIL"; then
-            echo "| --version Option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --version Option | FAIL |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| --version Option | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+            echo "| --version Option | SKIP |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "DRY_RUN: PASS"; then
-            echo "| --dry-run Option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --dry-run Option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "DRY_RUN: FAIL"; then
-            echo "| --dry-run Option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --dry-run Option | FAIL |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| --dry-run Option | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+            echo "| --dry-run Option | SKIP |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "GUIDE: PASS"; then
-            echo "| --guide Option | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| --guide Option | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "GUIDE: FAIL"; then
-            echo "| --guide Option | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| --guide Option | FAIL |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| --guide Option | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+            echo "| --guide Option | SKIP |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "FULL_AUDIT: PASS"; then
-            echo "| Full Audit Run | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| Full Audit Run | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "FULL_AUDIT: FAIL"; then
-            echo "| Full Audit Run | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| Full Audit Run | FAIL |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| Full Audit Run | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+            echo "| Full Audit Run | SKIP |" >> $GITHUB_STEP_SUMMARY
           fi
 
           if echo "$TEST_OUTPUT" | grep -q "JSON_OUTPUT: PASS"; then
-            echo "| JSON Output Validation | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            echo "| JSON Output Validation | PASS |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "JSON_OUTPUT: FAIL"; then
-            echo "| JSON Output Validation | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            echo "| JSON Output Validation | FAIL |" >> $GITHUB_STEP_SUMMARY
           elif echo "$TEST_OUTPUT" | grep -q "JSON_OUTPUT: WARN"; then
-            echo "| JSON Output Validation | ⚠️ Warning |" >> $GITHUB_STEP_SUMMARY
+            echo "| JSON Output Validation | WARN |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| JSON Output Validation | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+            echo "| JSON Output Validation | SKIP |" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -163,13 +163,13 @@ jobs:
           echo "#### Overall Result" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ $TEST_EXIT_CODE -eq 0 ]; then
-            echo "✅ **All tests passed**" >> $GITHUB_STEP_SUMMARY
+            echo "**[PASS] All tests passed**" >> $GITHUB_STEP_SUMMARY
             echo "test_passed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "❌ **Tests failed** (exit code: $TEST_EXIT_CODE)" >> $GITHUB_STEP_SUMMARY
+            echo "**[FAIL] Tests failed** (exit code: $TEST_EXIT_CODE)" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "<details>" >> $GITHUB_STEP_SUMMARY
-            echo "<summary>📋 Full Test Output (click to expand)</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "<summary>Full Test Output (click to expand)</summary>" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             echo "$TEST_OUTPUT" | tail -50 >> $GITHUB_STEP_SUMMARY
@@ -208,7 +208,7 @@ jobs:
     steps:
       - name: Generate comprehensive summary
         run: |
-          echo "# 🐳 Full Docker Matrix Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "# Full Docker Matrix Test Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
           echo "**Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
@@ -218,7 +218,7 @@ jobs:
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "## 📊 Distribution Compatibility Matrix" >> $GITHUB_STEP_SUMMARY
+          echo "## Distribution Compatibility Matrix" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Distribution | Family | Version | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|--------------|--------|---------|--------|" >> $GITHUB_STEP_SUMMARY
@@ -230,79 +230,79 @@ jobs:
 
           # Ubuntu
           case "${{ needs.docker-matrix.outputs.ubuntu-22-04 }}" in
-            passed) echo "| Ubuntu | Debian-based | 22.04 LTS | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Ubuntu | Debian-based | 22.04 LTS | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Ubuntu | Debian-based | 22.04 LTS | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Ubuntu | Debian-based | 22.04 LTS | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Ubuntu | Debian-based | 22.04 LTS | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Ubuntu | Debian-based | 22.04 LTS | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.ubuntu-24-04 }}" in
-            passed) echo "| Ubuntu | Debian-based | 24.04 LTS | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Ubuntu | Debian-based | 24.04 LTS | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Ubuntu | Debian-based | 24.04 LTS | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Ubuntu | Debian-based | 24.04 LTS | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Ubuntu | Debian-based | 24.04 LTS | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Ubuntu | Debian-based | 24.04 LTS | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           # Debian
           case "${{ needs.docker-matrix.outputs.debian-11 }}" in
-            passed) echo "| Debian | Debian-based | 11 (Bullseye) | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Debian | Debian-based | 11 (Bullseye) | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Debian | Debian-based | 11 (Bullseye) | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Debian | Debian-based | 11 (Bullseye) | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Debian | Debian-based | 11 (Bullseye) | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Debian | Debian-based | 11 (Bullseye) | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.debian-12 }}" in
-            passed) echo "| Debian | Debian-based | 12 (Bookworm) | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Debian | Debian-based | 12 (Bookworm) | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Debian | Debian-based | 12 (Bookworm) | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Debian | Debian-based | 12 (Bookworm) | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Debian | Debian-based | 12 (Bookworm) | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Debian | Debian-based | 12 (Bookworm) | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           # RHEL-based
           case "${{ needs.docker-matrix.outputs.rockylinux-9 }}" in
-            passed) echo "| Rocky Linux | RHEL-based | 9 | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Rocky Linux | RHEL-based | 9 | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Rocky Linux | RHEL-based | 9 | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Rocky Linux | RHEL-based | 9 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Rocky Linux | RHEL-based | 9 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Rocky Linux | RHEL-based | 9 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.almalinux-9 }}" in
-            passed) echo "| AlmaLinux | RHEL-based | 9 | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| AlmaLinux | RHEL-based | 9 | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| AlmaLinux | RHEL-based | 9 | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| AlmaLinux | RHEL-based | 9 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| AlmaLinux | RHEL-based | 9 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| AlmaLinux | RHEL-based | 9 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.fedora-39 }}" in
-            passed) echo "| Fedora | RHEL-based | 39 | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Fedora | RHEL-based | 39 | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Fedora | RHEL-based | 39 | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Fedora | RHEL-based | 39 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Fedora | RHEL-based | 39 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Fedora | RHEL-based | 39 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.fedora-40 }}" in
-            passed) echo "| Fedora | RHEL-based | 40 | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Fedora | RHEL-based | 40 | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Fedora | RHEL-based | 40 | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Fedora | RHEL-based | 40 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Fedora | RHEL-based | 40 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Fedora | RHEL-based | 40 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           # Alpine
           case "${{ needs.docker-matrix.outputs.alpine-3-19 }}" in
-            passed) echo "| Alpine | musl libc | 3.19 | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Alpine | musl libc | 3.19 | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Alpine | musl libc | 3.19 | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Alpine | musl libc | 3.19 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Alpine | musl libc | 3.19 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Alpine | musl libc | 3.19 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.alpine-3-20 }}" in
-            passed) echo "| Alpine | musl libc | 3.20 | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Alpine | musl libc | 3.20 | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Alpine | musl libc | 3.20 | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Alpine | musl libc | 3.20 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Alpine | musl libc | 3.20 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Alpine | musl libc | 3.20 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           # Others
           case "${{ needs.docker-matrix.outputs.archlinux-latest }}" in
-            passed) echo "| Arch Linux | Rolling | latest | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Arch Linux | Rolling | latest | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Arch Linux | Rolling | latest | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Arch Linux | Rolling | latest | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| Arch Linux | Rolling | latest | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| Arch Linux | Rolling | latest | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.opensuse-leap-15-5 }}" in
-            passed) echo "| openSUSE Leap | SUSE | 15.5 | ✅ Passed |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| openSUSE Leap | SUSE | 15.5 | ⚠️ Pull Failed |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| openSUSE Leap | SUSE | 15.5 | ❌ Failed |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| openSUSE Leap | SUSE | 15.5 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
+            pull_failed) echo "| openSUSE Leap | SUSE | 15.5 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
+            *) echo "| openSUSE Leap | SUSE | 15.5 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
           esac
 
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -311,15 +311,15 @@ jobs:
           TOTAL=$((PASSED + FAILED + PULL_FAILED))
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 📈 Summary Statistics" >> $GITHUB_STEP_SUMMARY
+          echo "## Summary Statistics" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Total Distributions Tested | $TOTAL |" >> $GITHUB_STEP_SUMMARY
-          echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
-          echo "| ❌ Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "| Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
           if [ $PULL_FAILED -gt 0 ]; then
-            echo "| ⚠️ Pull Failed | $PULL_FAILED |" >> $GITHUB_STEP_SUMMARY
+            echo "| Pull Failed | $PULL_FAILED |" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
 
@@ -333,7 +333,7 @@ jobs:
           # Tests performed section
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 🧪 Tests Performed" >> $GITHUB_STEP_SUMMARY
+          echo "## Tests Performed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Each distribution runs the following test suite:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -349,7 +349,7 @@ jobs:
           # Artifacts section
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "## Artifacts" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Detailed test logs are available as downloadable artifacts for each distribution." >> $GITHUB_STEP_SUMMARY
           echo "Navigate to the **Artifacts** section at the bottom of this workflow run to download." >> $GITHUB_STEP_SUMMARY
@@ -359,11 +359,11 @@ jobs:
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ needs.docker-matrix.result }}" == "success" ]; then
-            echo "## ✅ Overall Result: PASSED" >> $GITHUB_STEP_SUMMARY
+            echo "## Overall Result: PASSED" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "All distribution compatibility tests completed successfully!" >> $GITHUB_STEP_SUMMARY
+            echo "All distribution compatibility tests completed successfully." >> $GITHUB_STEP_SUMMARY
           else
-            echo "## ❌ Overall Result: FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "## Overall Result: FAILED" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Some distribution compatibility tests failed. Review individual job logs for details." >> $GITHUB_STEP_SUMMARY
             exit 1
