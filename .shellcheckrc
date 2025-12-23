@@ -1,0 +1,8 @@
+# ShellCheck configuration
+# This ensures consistent behavior between CI and local development
+
+# Follow source statements to check included files
+external-sources=true
+
+# Minimum severity level (error, warning, info, style)
+severity=warning

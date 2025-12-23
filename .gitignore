@@ -1,1 +1,28 @@
+# VPS Audit reports (generated output)
 vps-audit-report*.txt
+vps-audit-report*.json
+
+# Test artifacts
+test-results/
+
+# Configuration files (may contain sensitive settings)
+.vps-audit.conf
+
+# Editor and OS files
+.DS_Store
+*.swp
+*.swo
+*~
+.*.swp
+\#*\#
+.#*
+
+# IDE directories
+.idea/
+.vscode/
+*.sublime-*
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
