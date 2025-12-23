@@ -168,11 +168,23 @@ jobs:
           else
             echo "**[FAIL] Tests failed** (exit code: $TEST_EXIT_CODE)" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "<details>" >> $GITHUB_STEP_SUMMARY
-            echo "<summary>Full Test Output (click to expand)</summary>" >> $GITHUB_STEP_SUMMARY
+
+            # Show failure details in a more prominent way
+            echo "#### Failure Details" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Extract the specific failure from output
+            if echo "$TEST_OUTPUT" | grep -q "DRY_RUN: FAIL"; then
+              echo "The \`--dry-run\` test failed. This usually indicates a missing dependency or script error." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            echo "<details open>" >> $GITHUB_STEP_SUMMARY
+            echo "<summary>Full Test Output</summary>" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "$TEST_OUTPUT" | tail -50 >> $GITHUB_STEP_SUMMARY
+            # Show more output - last 100 lines instead of 50
+            echo "$TEST_OUTPUT" | tail -100 >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             echo "</details>" >> $GITHUB_STEP_SUMMARY
             echo "test_passed=false" >> "$GITHUB_OUTPUT"

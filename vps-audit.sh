@@ -3050,16 +3050,13 @@ main() {
     # Initialize colors (after parsing args to respect --quiet)
     init_colors
 
-    # Check prerequisites (after colors so we can show warnings)
-    check_prerequisites
-
-    # Show guide if requested
+    # Show guide if requested (before prerequisites since it doesn't need them)
     if [[ "${CONFIG[show_guide]}" == "true" ]]; then
         print_quickstart_guide
         exit 0
     fi
 
-    # Check for dry-run mode
+    # Check for dry-run mode (before prerequisites since it doesn't need them)
     if [[ "${CONFIG[dry_run]}" == "true" ]]; then
         output "${BOLD}VPS Security Audit Tool v${VERSION}${NC} (DRY RUN)"
         output "The following checks would be performed:"
@@ -3101,6 +3098,9 @@ main() {
 
         exit 0
     fi
+
+    # Check prerequisites (after colors so we can show warnings)
+    check_prerequisites
 
     # Check root privileges (Issue #9)
     check_root

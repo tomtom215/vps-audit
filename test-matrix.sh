@@ -110,19 +110,24 @@ get_setup_commands() {
 
     case "$image" in
         ubuntu:*|debian:*)
-            echo "apt-get update -qq && apt-get install -y -qq procps iproute2 net-tools curl openssh-server >/dev/null 2>&1"
+            # Keep stdout quiet but show stderr for debugging
+            echo "apt-get update -qq && apt-get install -y -qq procps iproute2 net-tools curl openssh-server hostname coreutils findutils >/dev/null"
             ;;
         rockylinux:*|almalinux:*|fedora:*)
-            echo "dnf install -y -q procps-ng iproute net-tools curl openssh-server >/dev/null 2>&1"
+            # Keep stdout quiet but show stderr for debugging
+            echo "dnf install -y -q procps-ng iproute net-tools curl openssh-server hostname coreutils findutils >/dev/null"
             ;;
         alpine:*)
-            echo "apk add --no-cache bash coreutils findutils grep gawk sed procps iproute2 curl openssh >/dev/null 2>&1"
+            # Alpine needs bash explicitly, keep stdout quiet but show stderr
+            echo "apk add --no-cache bash coreutils findutils grep gawk sed procps iproute2 curl openssh >/dev/null"
             ;;
         archlinux:*)
-            echo "pacman -Sy --noconfirm --quiet procps-ng iproute2 net-tools curl openssh >/dev/null 2>&1"
+            # Arch needs explicit refresh, keep stdout quiet but show stderr
+            echo "pacman -Sy --noconfirm procps-ng iproute2 net-tools curl openssh coreutils findutils which >/dev/null"
             ;;
         opensuse/*:*)
-            echo "zypper -q install -y procps iproute2 net-tools curl openssh >/dev/null 2>&1"
+            # openSUSE setup, keep stdout quiet but show stderr
+            echo "zypper -n install -y procps iproute2 net-tools curl openssh hostname coreutils findutils >/dev/null"
             ;;
         *)
             echo "echo 'No setup needed'"
@@ -159,6 +164,13 @@ test_distro() {
 #!/bin/bash
 set -e
 
+# Show environment info for debugging
+echo "=== Environment Info ==="
+echo "Bash version: ${BASH_VERSION:-unknown}"
+echo "Current user: $(whoami)"
+echo "Working directory: $(pwd)"
+echo ""
+
 # Run syntax check
 echo "=== Running bash -n syntax check ==="
 if bash -n /test/vps-audit.sh; then
@@ -171,40 +183,62 @@ fi
 # Run --help test
 echo ""
 echo "=== Running --help test ==="
-if /test/vps-audit.sh --help >/dev/null 2>&1; then
+set +e
+help_output=$(/test/vps-audit.sh --help 2>&1)
+help_exit=$?
+set -e
+if [[ $help_exit -eq 0 ]]; then
     echo "HELP: PASS"
 else
-    echo "HELP: FAIL"
+    echo "HELP: FAIL (exit code: $help_exit)"
+    echo "Output: $help_output"
     exit 1
 fi
 
 # Run --version test
 echo ""
 echo "=== Running --version test ==="
-if /test/vps-audit.sh --version 2>&1 | grep -q "VPS Security Audit Tool"; then
+set +e
+version_output=$(/test/vps-audit.sh --version 2>&1)
+version_exit=$?
+set -e
+if echo "$version_output" | grep -q "VPS Security Audit Tool"; then
     echo "VERSION: PASS"
 else
-    echo "VERSION: FAIL"
+    echo "VERSION: FAIL (exit code: $version_exit)"
+    echo "Output: $version_output"
     exit 1
 fi
 
 # Run --dry-run test
 echo ""
 echo "=== Running --dry-run test ==="
-if /test/vps-audit.sh --dry-run 2>&1 | grep -q "DRY RUN"; then
+set +e
+dryrun_output=$(/test/vps-audit.sh --dry-run 2>&1)
+dryrun_exit=$?
+set -e
+if echo "$dryrun_output" | grep -q "DRY RUN"; then
     echo "DRY_RUN: PASS"
 else
-    echo "DRY_RUN: FAIL"
+    echo "DRY_RUN: FAIL (exit code: $dryrun_exit)"
+    echo "--- Begin --dry-run output ---"
+    echo "$dryrun_output"
+    echo "--- End --dry-run output ---"
     exit 1
 fi
 
 # Run --guide test
 echo ""
 echo "=== Running --guide test ==="
-if /test/vps-audit.sh --guide 2>&1 | grep -q "Quick-Start"; then
+set +e
+guide_output=$(/test/vps-audit.sh --guide 2>&1)
+guide_exit=$?
+set -e
+if echo "$guide_output" | grep -q "Quick-Start"; then
     echo "GUIDE: PASS"
 else
-    echo "GUIDE: FAIL"
+    echo "GUIDE: FAIL (exit code: $guide_exit)"
+    echo "Output: $guide_output"
     exit 1
 fi
 
@@ -212,7 +246,7 @@ fi
 echo ""
 echo "=== Running full audit ==="
 set +e
-/test/vps-audit.sh --no-suid --no-network -q -f json -o /tmp 2>&1
+audit_output=$(/test/vps-audit.sh --no-suid --no-network -q -f json -o /tmp 2>&1)
 exit_code=$?
 set -e
 
@@ -221,6 +255,9 @@ if [[ $exit_code -le 2 ]]; then
     echo "FULL_AUDIT: PASS (exit code: $exit_code)"
 else
     echo "FULL_AUDIT: FAIL (exit code: $exit_code)"
+    echo "--- Begin audit output ---"
+    echo "$audit_output"
+    echo "--- End audit output ---"
     exit 1
 fi
 
@@ -240,6 +277,8 @@ if [[ -n "$json_file" ]]; then
         echo "JSON_OUTPUT: PASS"
     else
         echo "JSON_OUTPUT: FAIL (invalid JSON structure)"
+        echo "JSON file contents:"
+        head -50 "$json_file"
         exit 1
     fi
 else
@@ -259,10 +298,22 @@ INNER_SCRIPT
         -v "${VPS_AUDIT_SCRIPT}:/test/vps-audit.sh:ro" \
         --entrypoint /bin/sh \
         "$image" \
-        -c "${setup_cmd}; cat > /tmp/test.sh << 'EOF'
+        -c "
+echo '=== Setup Phase ==='
+echo 'Installing required packages...'
+if ${setup_cmd}; then
+    echo 'Setup: SUCCESS'
+else
+    echo 'Setup: FAILED (exit code: '\$?')'
+    echo 'Continuing anyway to see what happens...'
+fi
+echo ''
+echo '=== Test Phase ==='
+cat > /tmp/test.sh << 'EOF'
 ${test_script}
 EOF
-bash /tmp/test.sh" 2>&1) || docker_exit_code=$?
+bash /tmp/test.sh
+" 2>&1) || docker_exit_code=$?
 
     docker_exit_code=${docker_exit_code:-0}
 
