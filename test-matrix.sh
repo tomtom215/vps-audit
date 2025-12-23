@@ -212,7 +212,7 @@ fi
 echo ""
 echo "=== Running full audit ==="
 set +e
-/test/vps-audit.sh --no-suid --no-network -q -f json 2>&1
+/test/vps-audit.sh --no-suid --no-network -q -f json -o /tmp 2>&1
 exit_code=$?
 set -e
 
@@ -227,8 +227,15 @@ fi
 # Check JSON output was created
 echo ""
 echo "=== Checking JSON output ==="
-if ls /tmp/vps-audit-report-*.json 2>/dev/null | head -1 | xargs -I{} test -f "{}"; then
-    json_file=$(ls /tmp/vps-audit-report-*.json 2>/dev/null | head -1)
+json_file=""
+for f in /tmp/vps-audit-report-*.json; do
+    if [[ -f "$f" ]]; then
+        json_file="$f"
+        break
+    fi
+done
+
+if [[ -n "$json_file" ]]; then
     if grep -q '"version"' "$json_file" && grep -q '"checks"' "$json_file"; then
         echo "JSON_OUTPUT: PASS"
     else
@@ -250,7 +257,7 @@ INNER_SCRIPT
 
     output=$(docker run --rm \
         -v "${VPS_AUDIT_SCRIPT}:/test/vps-audit.sh:ro" \
-        --entrypoint /bin/bash \
+        --entrypoint /bin/sh \
         "$image" \
         -c "${setup_cmd}; cat > /tmp/test.sh << 'EOF'
 ${test_script}
