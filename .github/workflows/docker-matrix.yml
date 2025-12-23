@@ -242,79 +242,79 @@ jobs:
 
           # Ubuntu
           case "${{ needs.docker-matrix.outputs.ubuntu-22-04 }}" in
-            passed) echo "| Ubuntu | Debian-based | 22.04 LTS | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Ubuntu | Debian-based | 22.04 LTS | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Ubuntu | Debian-based | 22.04 LTS | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Ubuntu | Debian-based | 22.04 LTS | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Ubuntu | Debian-based | 22.04 LTS | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Ubuntu | Debian-based | 22.04 LTS | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.ubuntu-24-04 }}" in
-            passed) echo "| Ubuntu | Debian-based | 24.04 LTS | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Ubuntu | Debian-based | 24.04 LTS | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Ubuntu | Debian-based | 24.04 LTS | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Ubuntu | Debian-based | 24.04 LTS | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Ubuntu | Debian-based | 24.04 LTS | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Ubuntu | Debian-based | 24.04 LTS | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           # Debian
           case "${{ needs.docker-matrix.outputs.debian-11 }}" in
-            passed) echo "| Debian | Debian-based | 11 (Bullseye) | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Debian | Debian-based | 11 (Bullseye) | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Debian | Debian-based | 11 (Bullseye) | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Debian | Debian-based | 11 (Bullseye) | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Debian | Debian-based | 11 (Bullseye) | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Debian | Debian-based | 11 (Bullseye) | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.debian-12 }}" in
-            passed) echo "| Debian | Debian-based | 12 (Bookworm) | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Debian | Debian-based | 12 (Bookworm) | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Debian | Debian-based | 12 (Bookworm) | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Debian | Debian-based | 12 (Bookworm) | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Debian | Debian-based | 12 (Bookworm) | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Debian | Debian-based | 12 (Bookworm) | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           # RHEL-based
           case "${{ needs.docker-matrix.outputs.rockylinux-9 }}" in
-            passed) echo "| Rocky Linux | RHEL-based | 9 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Rocky Linux | RHEL-based | 9 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Rocky Linux | RHEL-based | 9 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Rocky Linux | RHEL-based | 9 | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Rocky Linux | RHEL-based | 9 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Rocky Linux | RHEL-based | 9 | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.almalinux-9 }}" in
-            passed) echo "| AlmaLinux | RHEL-based | 9 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| AlmaLinux | RHEL-based | 9 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| AlmaLinux | RHEL-based | 9 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| AlmaLinux | RHEL-based | 9 | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| AlmaLinux | RHEL-based | 9 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| AlmaLinux | RHEL-based | 9 | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.fedora-39 }}" in
-            passed) echo "| Fedora | RHEL-based | 39 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Fedora | RHEL-based | 39 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Fedora | RHEL-based | 39 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Fedora | RHEL-based | 39 | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Fedora | RHEL-based | 39 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Fedora | RHEL-based | 39 | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.fedora-40 }}" in
-            passed) echo "| Fedora | RHEL-based | 40 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Fedora | RHEL-based | 40 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Fedora | RHEL-based | 40 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Fedora | RHEL-based | 40 | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Fedora | RHEL-based | 40 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Fedora | RHEL-based | 40 | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           # Alpine
           case "${{ needs.docker-matrix.outputs.alpine-3-19 }}" in
-            passed) echo "| Alpine | musl libc | 3.19 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Alpine | musl libc | 3.19 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Alpine | musl libc | 3.19 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Alpine | musl libc | 3.19 | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Alpine | musl libc | 3.19 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Alpine | musl libc | 3.19 | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.alpine-3-20 }}" in
-            passed) echo "| Alpine | musl libc | 3.20 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Alpine | musl libc | 3.20 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Alpine | musl libc | 3.20 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Alpine | musl libc | 3.20 | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Alpine | musl libc | 3.20 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Alpine | musl libc | 3.20 | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           # Others
           case "${{ needs.docker-matrix.outputs.archlinux-latest }}" in
-            passed) echo "| Arch Linux | Rolling | latest | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| Arch Linux | Rolling | latest | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| Arch Linux | Rolling | latest | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| Arch Linux | Rolling | latest | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| Arch Linux | Rolling | latest | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| Arch Linux | Rolling | latest | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           case "${{ needs.docker-matrix.outputs.opensuse-leap-15-5 }}" in
-            passed) echo "| openSUSE Leap | SUSE | 15.5 | PASS |" >> $GITHUB_STEP_SUMMARY; ((PASSED++)) ;;
-            pull_failed) echo "| openSUSE Leap | SUSE | 15.5 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; ((PULL_FAILED++)) ;;
-            *) echo "| openSUSE Leap | SUSE | 15.5 | FAIL |" >> $GITHUB_STEP_SUMMARY; ((FAILED++)) ;;
+            passed) echo "| openSUSE Leap | SUSE | 15.5 | PASS |" >> $GITHUB_STEP_SUMMARY; PASSED=$((PASSED + 1)) ;;
+            pull_failed) echo "| openSUSE Leap | SUSE | 15.5 | PULL FAILED |" >> $GITHUB_STEP_SUMMARY; PULL_FAILED=$((PULL_FAILED + 1)) ;;
+            *) echo "| openSUSE Leap | SUSE | 15.5 | FAIL |" >> $GITHUB_STEP_SUMMARY; FAILED=$((FAILED + 1)) ;;
           esac
 
           echo "" >> $GITHUB_STEP_SUMMARY
