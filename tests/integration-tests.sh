@@ -450,6 +450,175 @@ test_tool_info_array() {
 }
 
 # =============================================================================
+# PHASE 9 NEW CHECK FUNCTION PRESENCE TESTS
+# =============================================================================
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_phase9_functions_exist() {
+    local missing=()
+    local expected_functions=(
+        check_ssh_hardening_extended
+        check_sudoers_security
+        check_tmp_mount_options
+        check_file_integrity_monitoring
+        check_rootkit_detection
+        check_legacy_services
+        check_sensitive_permissions
+        check_docker_security
+        check_network_sysctl
+        check_home_directory_permissions
+        check_nfs_exports
+        check_path_security
+        check_exposed_services
+    )
+    for fn in "${expected_functions[@]}"; do
+        if ! grep -q "^${fn}()" "$VPS_AUDIT_SCRIPT"; then
+            missing+=("$fn")
+        fi
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Missing Phase 9 functions: ${missing[*]}"
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_phase9_functions_in_main() {
+    local missing=()
+    local expected_calls=(
+        check_ssh_hardening_extended
+        check_sudoers_security
+        check_tmp_mount_options
+        check_file_integrity_monitoring
+        check_rootkit_detection
+        check_legacy_services
+        check_sensitive_permissions
+        check_docker_security
+        check_network_sysctl
+        check_home_directory_permissions
+        check_nfs_exports
+        check_path_security
+        check_exposed_services
+    )
+    for fn in "${expected_calls[@]}"; do
+        # Must appear as a call (indented or otherwise) in the script
+        if ! grep -q "^[[:space:]]*${fn}$" "$VPS_AUDIT_SCRIPT"; then
+            missing+=("$fn")
+        fi
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Phase 9 calls missing from main(): ${missing[*]}"
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_version_updated() {
+    local output
+    output=$("$VPS_AUDIT_SCRIPT" --version 2>&1)
+    assert_contains "$output" "2.3.0" "Version should be 2.3.0"
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_dry_run_new_categories() {
+    local output
+    output=$("$VPS_AUDIT_SCRIPT" --dry-run 2>&1)
+    # Match against the description strings used in the dry-run output (not the category keys)
+    assert_contains "$output" "integrity"  "Dry run should mention integrity monitoring"
+    assert_contains "$output" "Docker"     "Dry run should mention Docker security check"
+    assert_contains "$output" "noexec"     "Dry run should mention temp mount options (noexec)"
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_checks_filter_new_categories() {
+    local output
+    output=$("$VPS_AUDIT_SCRIPT" --dry-run --checks integrity,docker 2>&1)
+    assert_contains "$output" "DRY RUN" "Should enter dry-run mode"
+    assert_contains "$output" "skipped"  "Other checks should be skipped"
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_ssh_hardening_check_present() {
+    grep -q "check_ssh_hardening_extended" "$VPS_AUDIT_SCRIPT" || {
+        echo "check_ssh_hardening_extended not found"
+        return 1
+    }
+    grep -q "X11Forwarding" "$VPS_AUDIT_SCRIPT" || {
+        echo "X11Forwarding check not found"
+        return 1
+    }
+    grep -q "MaxAuthTries" "$VPS_AUDIT_SCRIPT" || {
+        echo "MaxAuthTries check not found"
+        return 1
+    }
+    grep -q "ClientAliveInterval" "$VPS_AUDIT_SCRIPT" || {
+        echo "ClientAliveInterval check not found"
+        return 1
+    }
+    grep -q "PermitEmptyPasswords" "$VPS_AUDIT_SCRIPT" || {
+        echo "PermitEmptyPasswords check not found"
+        return 1
+    }
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_exposed_services_check_present() {
+    grep -q "check_exposed_services" "$VPS_AUDIT_SCRIPT" || {
+        echo "check_exposed_services not found"
+        return 1
+    }
+    # Verify it checks well-known backend service ports
+    grep -q '"3306"' "$VPS_AUDIT_SCRIPT" || {
+        echo "MySQL port 3306 not in check_exposed_services"
+        return 1
+    }
+    grep -q '"6379"' "$VPS_AUDIT_SCRIPT" || {
+        echo "Redis port 6379 not in check_exposed_services"
+        return 1
+    }
+    grep -q '"27017"' "$VPS_AUDIT_SCRIPT" || {
+        echo "MongoDB port 27017 not in check_exposed_services"
+        return 1
+    }
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_sudoers_check_present() {
+    grep -q "check_sudoers_security" "$VPS_AUDIT_SCRIPT" || {
+        echo "check_sudoers_security not found"
+        return 1
+    }
+    grep -q "NOPASSWD" "$VPS_AUDIT_SCRIPT" || {
+        echo "NOPASSWD check not found"
+        return 1
+    }
+    grep -q "sudoers.d" "$VPS_AUDIT_SCRIPT" || {
+        echo "/etc/sudoers.d check not found"
+        return 1
+    }
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_network_sysctl_check_present() {
+    grep -q "check_network_sysctl" "$VPS_AUDIT_SCRIPT" || {
+        echo "check_network_sysctl not found"
+        return 1
+    }
+    grep -q "ip_forward" "$VPS_AUDIT_SCRIPT" || {
+        echo "ip_forward sysctl not checked"
+        return 1
+    }
+    grep -q "kernel.sysrq" "$VPS_AUDIT_SCRIPT" || {
+        echo "kernel.sysrq sysctl not checked"
+        return 1
+    }
+    grep -q "yama.ptrace_scope" "$VPS_AUDIT_SCRIPT" || {
+        echo "kernel.yama.ptrace_scope sysctl not checked"
+        return 1
+    }
+}
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -514,6 +683,19 @@ main() {
     echo ""
     echo "── Error Handling Tests ──"
     run_test "Missing output directory" test_missing_output_dir
+
+    # Phase 9 new check tests
+    echo ""
+    echo "── Phase 9: New Security Check Tests ──"
+    run_test "Phase 9 functions exist" test_phase9_functions_exist
+    run_test "Phase 9 functions called in main()" test_phase9_functions_in_main
+    run_test "Version updated to 2.3.0" test_version_updated
+    run_test "Dry run lists new categories" test_dry_run_new_categories
+    run_test "--checks filter with new categories" test_checks_filter_new_categories
+    run_test "SSH hardening check (X11/MaxAuthTries/idle/empty-pw)" test_ssh_hardening_check_present
+    run_test "Exposed services check (MySQL/Redis/MongoDB)" test_exposed_services_check_present
+    run_test "Sudoers NOPASSWD check" test_sudoers_check_present
+    run_test "Network sysctl hardening check" test_network_sysctl_check_present
 
     # Summary
     echo ""
