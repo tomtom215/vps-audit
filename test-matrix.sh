@@ -352,19 +352,20 @@ run_static_analysis() {
     echo "${BOLD}Static Analysis Tests${NC}"
     echo "═══════════════════════════════════════════════════════════════"
 
+    # --- Test 1: bash -n syntax check ---
     ((TOTAL_TESTS++))
-
-    # Bash syntax check
     log_info "Running bash -n syntax check..."
-    if bash -n "$VPS_AUDIT_SCRIPT"; then
+    if bash -n "$VPS_AUDIT_SCRIPT" 2>&1; then
         log_success "Bash syntax check passed"
+        ((PASSED_TESTS++))
     else
         log_error "Bash syntax check failed"
         ((FAILED_TESTS++))
         return 1
     fi
 
-    # Shellcheck
+    # --- Test 2: shellcheck static analysis ---
+    ((TOTAL_TESTS++))
     if command -v shellcheck &>/dev/null; then
         log_info "Running shellcheck..."
         local shellcheck_output

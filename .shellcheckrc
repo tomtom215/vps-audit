@@ -5,4 +5,5 @@
 external-sources=true
 
 # Minimum severity level (error, warning, info, style)
-severity=warning
+# Set to "style" to catch every possible issue - zero exceptions policy
+severity=style

@@ -192,25 +192,16 @@ is_numeric() {
     [[ "$value" =~ ^[0-9]+$ ]]
 }
 
+# Check for a signed integer value (handles negative numbers, e.g. pwquality credits)
+is_integer() {
+    local value="$1"
+    [[ "$value" =~ ^-?[0-9]+$ ]]
+}
+
 # shellcheck disable=SC2317  # Called from parse_args
 validate_percentage() {
     local value="$1"
-    is_numeric "$value" && [[ $value -ge 0 ]] && [[ $value -le 100 ]]
-}
-
-# Safe command execution with error handling (Issue #45)
-# shellcheck disable=SC2317  # Called dynamically
-safe_exec() {
-    local cmd="$1"
-    local default="${2:-}"
-    local result
-
-    if result=$(eval "$cmd" 2>/dev/null); then
-        echo "$result"
-    else
-        log_debug "Command failed: $cmd"
-        echo "$default"
-    fi
+    is_numeric "$value" && [[ $value -le 100 ]]
 }
 
 # =============================================================================
@@ -285,7 +276,7 @@ detect_tool_versions() {
     if has_command stat; then
         if stat --version 2>&1 | grep -q "GNU\|coreutils"; then
             TOOL_INFO[stat_type]="gnu"
-        elif stat -f "%z" / &>/dev/null 2>&1; then
+        elif stat -f "%z" / &>/dev/null; then
             TOOL_INFO[stat_type]="bsd"
         else
             # Fallback: try GNU syntax first
@@ -875,25 +866,31 @@ check_security() {
 # JSON OUTPUT (Issue #72)
 # =============================================================================
 
+# Properly escape a string for safe embedding in JSON (top-level so init_json can use it)
+# Order matters: backslash must be escaped first before any other substitution
+json_escape() {
+    local str="$1"
+    str="${str//\\/\\\\}"      # Escape backslashes first
+    str="${str//\"/\\\"}"      # Escape double quotes
+    str="${str//$'\n'/\\n}"    # Escape newlines
+    str="${str//$'\r'/\\r}"    # Escape carriage returns
+    str="${str//$'\t'/\\t}"    # Escape tabs
+    printf '%s' "$str"
+}
+
 init_json() {
-    JSON_OUTPUT='{"version":"'"$VERSION"'","timestamp":"'"$(date -Iseconds 2>/dev/null || date)"'","hostname":"'"$(hostname)"'","os":"'"${OS_INFO[name]}"'","checks":['
+    local timestamp hostname_esc os_esc timestamp_esc
+    timestamp=$(date -Iseconds 2>/dev/null || date)
+    hostname_esc=$(json_escape "$(hostname)")
+    os_esc=$(json_escape "${OS_INFO[name]}")
+    timestamp_esc=$(json_escape "$timestamp")
+    JSON_OUTPUT='{"version":"'"$VERSION"'","timestamp":"'"$timestamp_esc"'","hostname":"'"$hostname_esc"'","os":"'"$os_esc"'","checks":['
 }
 
 add_json_result() {
     local test_name="$1"
     local status="$2"
     local message="$3"
-
-    # Properly escape JSON strings (order matters: backslash first, then other chars)
-    json_escape() {
-        local str="$1"
-        str="${str//\\/\\\\}"      # Escape backslashes first
-        str="${str//\"/\\\"}"      # Escape double quotes
-        str="${str//$'\n'/\\n}"    # Escape newlines
-        str="${str//$'\r'/\\r}"    # Escape carriage returns
-        str="${str//$'\t'/\\t}"    # Escape tabs
-        printf '%s' "$str"
-    }
 
     test_name=$(json_escape "$test_name")
     message=$(json_escape "$message")
@@ -912,7 +909,8 @@ finalize_json() {
 
     if [[ "${CONFIG[output_format]}" == "json" ]] || [[ "${CONFIG[output_format]}" == "both" ]]; then
         local json_file="${REPORT_FILE%.txt}.json"
-        echo "$JSON_OUTPUT" > "$json_file"
+        # Use >| to force overwrite even with noclobber set
+        printf '%s\n' "$JSON_OUTPUT" >| "$json_file"
         chmod 600 "$json_file"
         output "\nJSON report saved to: $json_file"
     fi
@@ -1120,6 +1118,21 @@ parse_args() {
                 ;;
         esac
         shift
+    done
+
+    # Validate threshold relationships: warn must be strictly less than fail
+    local -A threshold_pairs=(
+        [disk]="disk_warn:disk_fail"
+        [mem]="mem_warn:mem_fail"
+        [logins]="failed_logins_warn:failed_logins_fail"
+    )
+    for pair in "${threshold_pairs[@]}"; do
+        local warn_key="${pair%%:*}"
+        local fail_key="${pair##*:}"
+        if [[ ${THRESHOLDS[$warn_key]} -ge ${THRESHOLDS[$fail_key]} ]]; then
+            log_error "Threshold error: ${warn_key} (${THRESHOLDS[$warn_key]}) must be less than ${fail_key} (${THRESHOLDS[$fail_key]})"
+            exit 1
+        fi
     done
 }
 
@@ -1355,9 +1368,10 @@ check_firewall_status() {
         local input_rules
         input_rules=$(iptables -L INPUT -n --line-numbers 2>/dev/null | tail -n +3 | wc -l || echo 0)
 
-        # Check if default policy is DROP/REJECT
+        # Check if default policy is DROP/REJECT (use portable POSIX sed, not grep -P)
         local input_policy
-        input_policy=$(iptables -L INPUT -n 2>/dev/null | head -1 | grep -oP '\(policy \K[A-Z]+' || echo "ACCEPT")
+        input_policy=$(iptables -L INPUT -n 2>/dev/null | head -1 | sed -n 's/.*policy \([A-Z]*\).*/\1/p')
+        input_policy="${input_policy:-ACCEPT}"
 
         if [[ $input_rules -gt 0 ]] || [[ "$input_policy" == "DROP" ]] || [[ "$input_policy" == "REJECT" ]]; then
             firewall_active=true
@@ -1638,9 +1652,12 @@ check_open_ports() {
     local -A all_ports=()
 
     while read -r line; do
-        # Skip headers
-        [[ "$line" =~ ^Netid ]] || [[ "$line" =~ ^Proto ]] || [[ "$line" =~ ^State ]] && continue
+        # Skip header lines and blank lines
+        # Use explicit if to avoid &&/|| precedence ambiguity
         [[ -z "$line" ]] && continue
+        if [[ "$line" =~ ^(Netid|Proto|State) ]]; then
+            continue
+        fi
 
         local addr="" port=""
 
@@ -1788,11 +1805,14 @@ check_cpu_usage() {
     local cpu_usage=0
 
     if [[ -f /proc/stat ]]; then
-        # Read CPU stats twice with a small delay for accurate measurement
+        # Read CPU stats twice with a small delay for accurate measurement.
+        # /proc/stat fields: cpu user nice system idle iowait irq softirq steal ...
+        # active = user+nice+system+irq+softirq+steal (fields 2,3,4,7,8,9)
+        # idle   = idle+iowait                        (fields 5,6)
         local cpu1 cpu2
-        cpu1=$(head -1 /proc/stat | awk '{print $2+$3+$4, $5}')
+        cpu1=$(head -1 /proc/stat | awk '{print $2+$3+$4+$7+$8+$9, $5+$6}')
         sleep 0.5
-        cpu2=$(head -1 /proc/stat | awk '{print $2+$3+$4, $5}')
+        cpu2=$(head -1 /proc/stat | awk '{print $2+$3+$4+$7+$8+$9, $5+$6}')
 
         local active1 idle1 active2 idle2
         read -r active1 idle1 <<< "$cpu1"
@@ -1895,32 +1915,34 @@ check_password_policy() {
             issues+=("minlen<12")
         fi
 
-        # Check complexity requirements (negative value means required)
+        # Check complexity requirements: pwquality uses negative values to require a character
+        # class (e.g., dcredit=-1 means at least one digit required).  is_numeric() only
+        # matches non-negative integers, so use is_integer() here to handle the minus sign.
         local dcredit ucredit lcredit ocredit
         dcredit=$(grep "^dcredit" /etc/security/pwquality.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
         ucredit=$(grep "^ucredit" /etc/security/pwquality.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
         lcredit=$(grep "^lcredit" /etc/security/pwquality.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
         ocredit=$(grep "^ocredit" /etc/security/pwquality.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
 
-        if is_numeric "$dcredit" && [[ $dcredit -lt 0 ]]; then
+        if is_integer "$dcredit" && [[ $dcredit -lt 0 ]]; then
             ((policy_score++)) || true
         else
             issues+=("no-digit-req")
         fi
 
-        if is_numeric "$ucredit" && [[ $ucredit -lt 0 ]]; then
+        if is_integer "$ucredit" && [[ $ucredit -lt 0 ]]; then
             ((policy_score++)) || true
         else
             issues+=("no-upper-req")
         fi
 
-        if is_numeric "$lcredit" && [[ $lcredit -lt 0 ]]; then
+        if is_integer "$lcredit" && [[ $lcredit -lt 0 ]]; then
             ((policy_score++)) || true
         else
             issues+=("no-lower-req")
         fi
 
-        if is_numeric "$ocredit" && [[ $ocredit -lt 0 ]]; then
+        if is_integer "$ocredit" && [[ $ocredit -lt 0 ]]; then
             ((policy_score++)) || true
         else
             issues+=("no-special-req")
@@ -1982,7 +2004,8 @@ check_suid_files() {
     # Find SUID files, using -xdev to stay on same filesystem (Issue #8)
     local suspicious_suid=()
     while IFS= read -r file; do
-        if [[ -n "$file" ]] && ! echo "$file" | grep -qE "$exclude_pattern"; then
+        # Use bash regex to avoid fork+exec overhead and UUOC anti-pattern
+        if [[ -n "$file" ]] && ! [[ "$file" =~ $exclude_pattern ]]; then
             suspicious_suid+=("$file")
         fi
     done < <(find / -xdev -type f -perm -4000 2>/dev/null)
@@ -2368,7 +2391,8 @@ check_sgid_files() {
 
     local suspicious_sgid=()
     while IFS= read -r file; do
-        if [[ -n "$file" ]] && ! echo "$file" | grep -qE "$exclude_pattern"; then
+        # Use bash regex to avoid fork+exec overhead and UUOC anti-pattern
+        if [[ -n "$file" ]] && ! [[ "$file" =~ $exclude_pattern ]]; then
             suspicious_sgid+=("$file")
         fi
     done < <(find / -xdev -type f -perm -2000 2>/dev/null)
@@ -2478,8 +2502,8 @@ check_login_banner() {
     # Check /etc/issue and /etc/issue.net
     if [[ -f /etc/issue ]] && [[ -s /etc/issue ]]; then
         local issue_content
-        issue_content=$(cat /etc/issue)
-        # Check it's not just default content (OS name or escape sequences)
+        issue_content=$(< /etc/issue)
+        # Check it's not just default content (OS name or \n/\l escape sequences)
         if [[ ! "$issue_content" =~ (Ubuntu|Debian|CentOS|Red\ Hat|\\\\n|\\\\l) ]]; then
             has_banner=true
         fi

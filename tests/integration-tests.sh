@@ -14,13 +14,14 @@ readonly VPS_AUDIT_SCRIPT="${SCRIPT_DIR}/vps-audit.sh"
 if [[ -t 1 ]]; then
     readonly GREEN='\033[0;32m'
     readonly RED='\033[0;31m'
+    # shellcheck disable=SC2034  # YELLOW kept for consistency; may be used in future tests
     readonly YELLOW='\033[1;33m'
     readonly BLUE='\033[0;34m'
     readonly NC='\033[0m'
 else
     readonly GREEN=''
     readonly RED=''
-    # shellcheck disable=SC2034  # YELLOW is used for consistency, may be used in future tests
+    # shellcheck disable=SC2034  # YELLOW kept for consistency; may be used in future tests
     readonly YELLOW=''
     readonly BLUE=''
     readonly NC=''
@@ -35,6 +36,7 @@ declare -i TESTS_FAILED=0
 # TEST FRAMEWORK
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly by run_test
 assert_equals() {
     local expected="$1"
     local actual="$2"
@@ -50,6 +52,7 @@ assert_equals() {
     fi
 }
 
+# shellcheck disable=SC2317  # Called indirectly by run_test
 assert_contains() {
     local haystack="$1"
     local needle="$2"
@@ -65,6 +68,7 @@ assert_contains() {
     fi
 }
 
+# shellcheck disable=SC2317  # Called indirectly by run_test
 assert_not_contains() {
     local haystack="$1"
     local needle="$2"
@@ -79,6 +83,7 @@ assert_not_contains() {
     fi
 }
 
+# shellcheck disable=SC2317  # Called indirectly by run_test
 assert_exit_code() {
     local expected="$1"
     local actual="$2"
@@ -114,7 +119,10 @@ run_test() {
         echo -e "${RED}FAIL${NC}"
         ((TESTS_FAILED++))
         if [[ -n "$output" ]]; then
-            echo "$output" | sed 's/^/    /'
+            # Indent each line of diagnostic output by 4 spaces
+            while IFS= read -r line; do
+                echo "    $line"
+            done <<< "$output"
         fi
     fi
 }
@@ -123,19 +131,29 @@ run_test() {
 # UNIT TESTS
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_script_exists() {
     [[ -f "$VPS_AUDIT_SCRIPT" ]]
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_script_executable() {
-    [[ -x "$VPS_AUDIT_SCRIPT" ]] || chmod +x "$VPS_AUDIT_SCRIPT"
+    # Ensure the script is executable; make it so if not (idempotent setup)
+    if [[ ! -x "$VPS_AUDIT_SCRIPT" ]]; then
+        chmod +x "$VPS_AUDIT_SCRIPT" || {
+            echo "Cannot make script executable"
+            return 1
+        }
+    fi
     [[ -x "$VPS_AUDIT_SCRIPT" ]]
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_bash_syntax() {
     bash -n "$VPS_AUDIT_SCRIPT"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_help_option() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --help 2>&1)
@@ -144,12 +162,14 @@ test_help_option() {
     assert_contains "$output" "--guide" "Help should mention --guide option"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_version_option() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --version 2>&1)
     assert_contains "$output" "VPS Security Audit Tool v" "Version should show tool name"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_guide_option() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --guide 2>&1)
@@ -158,6 +178,7 @@ test_guide_option() {
     assert_contains "$output" "firewall" "Guide should mention firewall"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_dry_run_option() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --dry-run 2>&1)
@@ -165,6 +186,7 @@ test_dry_run_option() {
     assert_contains "$output" "[x]" "Dry run should show check marks"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_invalid_option() {
     local output
     local exit_code=0
@@ -173,6 +195,7 @@ test_invalid_option() {
     assert_contains "$output" "Unknown option" "Should report unknown option"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_checks_filter() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --dry-run --checks ssh,firewall 2>&1)
@@ -180,6 +203,7 @@ test_checks_filter() {
     assert_contains "$output" "skipped" "Should show skipped checks"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_quiet_mode_help() {
     # Quiet mode should still show help
     local output
@@ -191,6 +215,7 @@ test_quiet_mode_help() {
 # FUNCTION UNIT TESTS (sourcing script components)
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_is_numeric_function() {
     # Extract and test the is_numeric function from the script
     # We can't source the whole script since it requires root and runs main
@@ -205,8 +230,10 @@ test_is_numeric_function() {
     local func_def
     func_def=$(sed -n '/^is_numeric() {/,/^}/p' "$VPS_AUDIT_SCRIPT")
 
-    # Test in a subshell
+    # Test in a subshell to avoid polluting the outer environment
+    # shellcheck disable=SC2317  # eval in subshell is intentional for function extraction
     (
+        # shellcheck disable=SC2294  # eval is intentional: extracts function from script text
         eval "$func_def"
 
         # Test with numbers
@@ -214,16 +241,52 @@ test_is_numeric_function() {
         is_numeric "0" || exit 1
         is_numeric "99999" || exit 1
 
-        # Test with non-numbers
-        is_numeric "abc" && exit 1
+        # Test with non-numbers (negative values must fail is_numeric)
+        is_numeric "abc"   && exit 1
         is_numeric "12.34" && exit 1
-        is_numeric "" && exit 1
-        is_numeric " " && exit 1
+        is_numeric ""      && exit 1
+        is_numeric " "     && exit 1
+        is_numeric "-1"    && exit 1
 
         exit 0
     )
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_is_integer_function() {
+    # Verify is_integer exists (handles signed integers for pwquality credits)
+    if ! grep -q 'is_integer()' "$VPS_AUDIT_SCRIPT"; then
+        echo "is_integer function not found"
+        return 1
+    fi
+
+    local func_def
+    func_def=$(sed -n '/^is_integer() {/,/^}/p' "$VPS_AUDIT_SCRIPT")
+
+    (
+        # shellcheck disable=SC2294  # eval is intentional: extracts function from script text
+        eval "$func_def"
+
+        # Positive integers must pass
+        is_integer "0"     || exit 1
+        is_integer "123"   || exit 1
+
+        # Negative integers must pass (pwquality credit values)
+        is_integer "-1"    || exit 1
+        is_integer "-100"  || exit 1
+
+        # Non-integers must fail
+        is_integer "abc"   && exit 1
+        is_integer "12.34" && exit 1
+        is_integer ""      && exit 1
+        is_integer " "     && exit 1
+        is_integer "--1"   && exit 1
+
+        exit 0
+    )
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_json_escape() {
     # Test that special characters are escaped properly
     local output
@@ -235,6 +298,7 @@ test_json_escape() {
 # OUTPUT FORMAT TESTS
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_text_output_format() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --dry-run 2>&1)
@@ -242,6 +306,7 @@ test_text_output_format() {
     assert_contains "$output" "VPS Security Audit Tool" "Should have header"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_json_output_mentions_json() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --dry-run -f json 2>&1)
@@ -253,24 +318,28 @@ test_json_output_mentions_json() {
 # THRESHOLD OPTION TESTS
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_disk_warn_threshold() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --help 2>&1)
     assert_contains "$output" "--disk-warn" "Should document disk-warn option"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_mem_warn_threshold() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --help 2>&1)
     assert_contains "$output" "--mem-warn" "Should document mem-warn option"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_login_warn_threshold() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --help 2>&1)
     assert_contains "$output" "--login-warn" "Should document login-warn option"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_invalid_threshold() {
     local output
     local exit_code=0
@@ -278,16 +347,28 @@ test_invalid_threshold() {
     assert_exit_code "1" "$exit_code" "Non-numeric threshold should fail"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_threshold_relationship() {
+    # warn >= fail should be rejected
+    local output
+    local exit_code=0
+    output=$("$VPS_AUDIT_SCRIPT" --disk-warn 80 --disk-fail 50 2>&1) || exit_code=$?
+    assert_exit_code "1" "$exit_code" "warn >= fail threshold should fail"
+    assert_contains "$output" "Threshold error" "Should report threshold relationship error"
+}
+
 # =============================================================================
 # SKIP OPTIONS TESTS
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_no_network_option() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --dry-run --no-network 2>&1)
     assert_contains "$output" "DRY RUN" "Should run in dry-run mode"
 }
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_no_suid_option() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --dry-run --no-suid 2>&1)
@@ -298,6 +379,7 @@ test_no_suid_option() {
 # ERROR HANDLING TESTS
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_missing_output_dir() {
     local output
     local exit_code=0
@@ -310,6 +392,7 @@ test_missing_output_dir() {
 # PORTABLE STAT FUNCTION TEST
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_portable_stat_syntax() {
     # Verify the portable_stat function is defined correctly
     grep -q "portable_stat()" "$VPS_AUDIT_SCRIPT" || {
@@ -332,6 +415,7 @@ test_portable_stat_syntax() {
 # HAS_COMMAND FUNCTION TEST
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_has_command_syntax() {
     # Verify the has_command function is defined
     grep -q "has_command()" "$VPS_AUDIT_SCRIPT" || {
@@ -350,6 +434,7 @@ test_has_command_syntax() {
 # TOOL INFO TEST
 # =============================================================================
 
+# shellcheck disable=SC2317  # Called indirectly via run_test
 test_tool_info_array() {
     # Verify TOOL_INFO array is defined
     grep -q "declare -A TOOL_INFO" "$VPS_AUDIT_SCRIPT" || {
@@ -398,6 +483,7 @@ main() {
     echo ""
     echo "── Function Tests ──"
     run_test "is_numeric function" test_is_numeric_function
+    run_test "is_integer function" test_is_integer_function
     run_test "JSON escaping" test_json_escape
     run_test "portable_stat function" test_portable_stat_syntax
     run_test "has_command function" test_has_command_syntax
@@ -416,6 +502,7 @@ main() {
     run_test "mem-warn threshold option" test_mem_warn_threshold
     run_test "login-warn threshold option" test_login_warn_threshold
     run_test "Invalid threshold handling" test_invalid_threshold
+    run_test "Threshold relationship validation" test_threshold_relationship
 
     # Skip option tests
     echo ""
