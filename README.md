@@ -226,17 +226,29 @@ Machine-readable format for integration with monitoring tools:
 
 ```json
 {
-  "version": "2.2.0",
+  "version": "2.4.0",
   "timestamp": "2025-01-15T10:30:00+00:00",
   "hostname": "myserver",
   "os": "Ubuntu 24.04 LTS",
   "checks": [
-    {"name": "SSH Root Login", "status": "PASS", "message": "Root login is disabled"},
-    ...
+    {
+      "name": "SSH Root Login",
+      "status": "PASS",
+      "message": "Root login is disabled",
+      "recommendation": "",
+      "critical": false
+    }
   ],
-  "summary": {"pass": 35, "warn": 5, "fail": 2, "critical_fail": 1}
+  "summary": {
+    "pass": 35, "warn": 5, "fail": 2, "critical_fail": 1,
+    "total": 42, "score": 83, "duration_seconds": 9
+  }
 }
 ```
+
+Each check object includes its `recommendation` (empty for passing checks) and a
+`critical` boolean. The `summary` includes `total`, the `score` percentage, and
+the wall-clock `duration_seconds` of the run.
 
 ## Exit Codes
 
@@ -267,10 +279,15 @@ Machine-readable format for integration with monitoring tools:
 
 You can create a configuration file to set defaults:
 
-**Locations (in order of precedence):**
-1. `/etc/vps-audit.conf`
-2. `~/.vps-audit.conf`
-3. `./.vps-audit.conf`
+**Locations (loaded in this order, each overriding the previous):**
+1. `/etc/vps-audit.conf` (system-wide)
+2. `~/.vps-audit.conf` (per-user)
+3. `./.vps-audit.conf` (current directory)
+
+**Precedence (lowest to highest):** built-in defaults → config file → command-line flags.
+Config files set *defaults*; any option you pass on the command line always wins.
+Where multiple config files exist, the more specific (later) one overrides the
+earlier one.
 
 **Example configuration:**
 
@@ -283,7 +300,10 @@ THRESHOLDS[disk_fail]=85
 THRESHOLDS[failed_logins_warn]=20
 ```
 
-**Note:** Configuration files are validated for security - they must be owned by root or the current user and must not be world-writable.
+**Security note:** Config files are *sourced* as root, so they are validated
+before use. A file is ignored (with a warning) unless it is owned by root or the
+invoking user **and** is not writable by group or other. Keep them `chmod 600`
+(or `644`), never group/world-writable.
 
 ## Security Features
 
@@ -388,6 +408,61 @@ Supported test distributions:
 - openSUSE Leap 15.5
 
 ## Changelog
+
+### Version 2.4.0 (Fork)
+
+Robustness, correctness, and security hardening pass.
+
+**Correctness fixes**
+- Fixed the `grep -c … || echo 0` idiom (18+ sites) that produced a two-line
+  `"0\n0"` on zero matches and broke numeric checks — a **fully up-to-date
+  system was misreported as "unable to determine updates"**. Update counting now
+  also honours per-manager exit codes (dnf/yum `100`, pacman `1`).
+- Open-ports check no longer drops **UDP** ports (removed the `ss state
+  listening` filter) and correctly classifies `127.0.0.53` (systemd-resolved)
+  and IPv6 addresses as loopback instead of "public".
+- Core-dump check no longer reports a **false PASS** from the default
+  `fs.suid_dumpable=0`; it requires an actual restriction.
+- SUID/SGID scans use exact-path matching so a planted binary ending in a
+  safe suffix (e.g. `/opt/evil/bin/su`) can no longer evade detection.
+- Failed-login log matching handles single-digit days (`Jul  5`), which the old
+  `sed` collapse silently missed.
+- Exposed-services check now detects IPv6-wildcard (`[::]:PORT`) database binds.
+- Password-policy check reads `pwquality.conf.d/*` drop-ins and PAM inline args.
+
+**Portability / robustness**
+- Pinned `LC_ALL=C` for deterministic parsing of `df`/`free`/`date`/`lscpu`.
+- Memory stats read `/proc/meminfo` directly (no dependency on `free -b/-h`,
+  which older BusyBox/Alpine lacks).
+- Portable report-file creation (`mktemp` suffix that Alpine/BSD accept),
+  `df -P` (no line-wrap on long device names), `portable_stat mtime` (replaces
+  non-portable `date -r`), `timeout`-guarded `hostname -f`.
+
+**Security**
+- Command-line flags now correctly override config-file values (precedence was
+  inverted). Config files that are group- or world-writable are rejected.
+- Hardened `PATH` and restrictive `umask` set for the whole run.
+- SSH settings read from the authoritative `sshd -T` effective configuration
+  (understands `Include` and `Match`), falling back to manual parsing.
+
+**Traceability & output**
+- Timestamped report filenames; report header records the invocation, package/
+  service manager, and coreutils variant; summary and JSON include run duration
+  and score. JSON checks gained `recommendation` and `critical` fields.
+
+**Testing / CI**
+- Added real sourced-function unit tests (port classification, int/JSON/byte
+  helpers, `portable_stat`) — the script is now safely `source`-able.
+- Fixed the CI ShellCheck gate, which silently never failed on warnings due to a
+  pattern that did not match ShellCheck's output format.
+
+### Version 2.3.0 (Fork)
+- Added Phase 9 advanced security checks: extended SSH hardening, sudoers
+  `NOPASSWD` review, `/tmp` mount options (noexec/nosuid/nodev), file-integrity
+  monitoring (AIDE/Tripwire), rootkit scanners (rkhunter/chkrootkit), legacy
+  plaintext services, sensitive-file permissions, Docker daemon/container
+  security, additional network sysctls, home-directory permissions, NFS export
+  safety, root `PATH` safety, and exposed backend services (DB/cache binds).
 
 ### Version 2.2.0 (Fork)
 - Added comprehensive command availability detection with caching

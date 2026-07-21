@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # VPS Security Audit Tool
-# Version: 2.2.0
+# Version: 2.4.0 (authoritative version is the VERSION constant below)
 #
 # Fork: https://github.com/tomtom215/vps-audit
 # Original: https://github.com/vernu/vps-audit
@@ -11,19 +11,46 @@
 #
 
 # =============================================================================
-# PHASE 1: CORE INFRASTRUCTURE & SAFETY
+# CORE INFRASTRUCTURE & SAFETY
 # =============================================================================
 
-# Exit on pipeline failures (Issue #1)
-# Note: We don't use set -eu because many commands intentionally may fail
-# and we handle errors explicitly throughout the script
+# Fail a pipeline if any component fails, so mis-parses surface instead of
+# silently yielding empty results. We deliberately do NOT use `set -e`/`set -u`:
+# many checks probe for things that legitimately may be absent, and errors are
+# handled explicitly at each call site.
 set -o pipefail
 
-# Prevent accidental overwriting of files
+# Prevent accidental clobbering of existing files via `>` redirection.
 set -o noclobber
 
-# Script version for tracking (Issue #33)
-readonly VERSION="2.3.0"
+# Deterministic locale. Every check parses command output (df, free, ss, stat,
+# sysctl, journalctl, syslog month names, lscpu "Model name", etc.). Without a
+# fixed locale these strings and number formats vary per system, silently
+# breaking checks. C locale is byte-oriented, English, and uses '.' as the
+# decimal separator - exactly what the parsers below assume.
+export LC_ALL=C
+export LANG=C
+
+# Predictable word-splitting (defend against a hostile inherited IFS).
+IFS=$' \t\n'
+
+# Hardened, absolute-path search order. Running as root, we prepend the standard
+# system directories so every tool resolves to a trusted location even if the
+# invoking environment has a manipulated PATH. Existing entries are preserved
+# afterwards for exotic layouts, but trusted directories always win.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export PATH
+
+# Restrictive default file-creation mask for the whole run: any report, JSON, or
+# temporary artifact is owner-only from the moment of creation (no race window).
+umask 077
+
+# Script version (semantic). Keep in sync with README changelog and CHANGELOG.
+readonly VERSION="2.4.0"
+
+# Monotonic-ish start time for run duration reporting (traceability).
+SCRIPT_START_EPOCH="$(date +%s 2>/dev/null || echo 0)"
+readonly SCRIPT_START_EPOCH
 
 # Minimum required Bash version
 readonly MIN_BASH_VERSION="4.0"
@@ -32,6 +59,7 @@ readonly MIN_BASH_VERSION="4.0"
 REPORT_FILE=""
 CLEANUP_ON_ERROR=true
 JSON_OUTPUT=""
+INVOCATION_ARGS=""   # raw command-line arguments, recorded for the report header
 declare -i PASS_COUNT=0
 declare -i WARN_COUNT=0
 declare -i FAIL_COUNT=0
@@ -181,7 +209,8 @@ cleanup() {
     exit "$exit_code"
 }
 
-trap cleanup EXIT INT TERM
+# The trap is installed inside main() (not here) so the script can be safely
+# sourced by the test harness without registering an exit handler in that shell.
 
 # =============================================================================
 # INPUT VALIDATION (Issue #44, #6, #13)
@@ -196,6 +225,30 @@ is_numeric() {
 is_integer() {
     local value="$1"
     [[ "$value" =~ ^-?[0-9]+$ ]]
+}
+
+# Count lines read from stdin and print a clean non-negative integer.
+#
+# This replaces the fragile `cmd | grep -c pat || echo 0` idiom: `grep -c`
+# prints "0" AND exits 1 on zero matches, so `|| echo 0` appended a SECOND "0",
+# yielding the two-line string "0\n0" that then failed every is_numeric() check
+# (e.g. a fully up-to-date server was reported as "unable to determine updates").
+# awk always prints exactly one integer, is unaffected by the exit status of
+# upstream pipe stages, and never emits BSD-style leading whitespace.
+#
+# Usage: count=$(some_command | grep "pattern" | count_lines)
+count_lines() {
+    awk 'END { print NR + 0 }'
+}
+
+# Strip everything but digits from a value and echo a clean base-10 integer
+# (empty -> "0"). Defensive normaliser for counts obtained from tools whose
+# output width or padding varies by platform (e.g. BSD `wc -l`). The 10#
+# prefix forces base-10 so a value like "08" is never misread as octal in the
+# arithmetic comparisons that consume it.
+sanitize_int() {
+    local v="${1//[^0-9]/}"
+    echo "$(( 10#${v:-0} ))"
 }
 
 # shellcheck disable=SC2317  # Called from parse_args
@@ -357,6 +410,7 @@ portable_stat() {
                 size)  stat -c '%s' "$file" 2>/dev/null ;;
                 owner) stat -c '%U' "$file" 2>/dev/null ;;
                 group) stat -c '%G' "$file" 2>/dev/null ;;
+                mtime) stat -c '%Y' "$file" 2>/dev/null ;;
             esac
             ;;
         bsd)
@@ -367,6 +421,7 @@ portable_stat() {
                 size)  stat -f '%z' "$file" 2>/dev/null ;;
                 owner) stat -f '%Su' "$file" 2>/dev/null ;;
                 group) stat -f '%Sg' "$file" 2>/dev/null ;;
+                mtime) stat -f '%m' "$file" 2>/dev/null ;;
             esac
             ;;
         *)
@@ -378,6 +433,7 @@ portable_stat() {
                 size)  stat -c '%s' "$file" 2>/dev/null || stat -f '%z' "$file" 2>/dev/null ;;
                 owner) stat -c '%U' "$file" 2>/dev/null || stat -f '%Su' "$file" 2>/dev/null ;;
                 group) stat -c '%G' "$file" 2>/dev/null || stat -f '%Sg' "$file" 2>/dev/null ;;
+                mtime) stat -c '%Y' "$file" 2>/dev/null || stat -f '%m' "$file" 2>/dev/null ;;
             esac
             ;;
     esac
@@ -446,7 +502,7 @@ check_prerequisites() {
 create_report_file() {
     local report_dir="${CONFIG[output_dir]}"
 
-    # Set restrictive umask
+    # Reaffirm the restrictive mask (already set globally) right before creation.
     umask 077
 
     # Verify directory exists and is writable
@@ -460,14 +516,27 @@ create_report_file() {
         exit 1
     fi
 
-    # Create file with secure permissions using mktemp
-    REPORT_FILE=$(mktemp "${report_dir}/vps-audit-report-XXXXXX.txt") || {
-        log_error "Failed to create report file"
+    # Timestamped, traceable, collision-proof filename. The six trailing X's
+    # MUST be the final characters of the template: GNU mktemp tolerates a
+    # suffix after them, but BusyBox (Alpine) and BSD mktemp reject it and would
+    # abort the entire run. So we mktemp without a suffix, then append ".txt".
+    local stamp template tmp_report
+    stamp=$(date +%Y%m%d-%H%M%S 2>/dev/null || echo "report")
+    template="${report_dir}/vps-audit-report-${stamp}-XXXXXX"
+    tmp_report=$(mktemp "$template") || {
+        log_error "Failed to create report file in: $report_dir"
         exit 1
     }
 
-    # Double-check permissions
-    chmod 600 "$REPORT_FILE"
+    REPORT_FILE="${tmp_report}.txt"
+    if ! mv -f "$tmp_report" "$REPORT_FILE" 2>/dev/null; then
+        # Rename failed (unusual); fall back to the suffix-less file so the run
+        # can still proceed. JSON path derivation handles either form.
+        REPORT_FILE="$tmp_report"
+    fi
+
+    # Double-check permissions (mktemp already created it 600 under umask 077).
+    chmod 600 "$REPORT_FILE" 2>/dev/null || true
 
     log_debug "Report file created: $REPORT_FILE"
 }
@@ -589,57 +658,86 @@ pkg_installed() {
     esac
 }
 
+# Print the number of available package updates, or return 1 (printing nothing)
+# if the count genuinely cannot be determined. The distinction matters: the
+# caller reports "unable to determine" only on a real error, never for a
+# healthy, fully-patched system. Per-manager exit-code semantics are honoured
+# (dnf/yum use 100 for "updates available"; pacman uses 1 for "none").
 get_update_count() {
-    local count=0
+    local out rc
 
     case "${OS_INFO[pkg_manager]}" in
         apt)
-            count=$(apt-get -s upgrade 2>/dev/null | grep -c "^Inst " || echo 0)
+            out=$(apt-get -s upgrade 2>/dev/null); rc=$?
+            [[ $rc -ne 0 ]] && return 1
+            printf '%s\n' "$out" | grep -c '^Inst '
             ;;
         dnf)
-            count=$(dnf check-update -q 2>/dev/null | grep -c "^[a-zA-Z]" || echo 0)
+            # 0 = no updates, 100 = updates available, anything else = error
+            out=$(dnf -q check-update 2>/dev/null); rc=$?
+            [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
+            printf '%s\n' "$out" | grep -c '^[a-zA-Z0-9]'
             ;;
         yum)
-            count=$(yum check-update -q 2>/dev/null | grep -c "^[a-zA-Z]" || echo 0)
+            out=$(yum -q check-update 2>/dev/null); rc=$?
+            [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
+            printf '%s\n' "$out" | grep -c '^[a-zA-Z0-9]'
             ;;
         pacman)
-            count=$(pacman -Qu 2>/dev/null | wc -l || echo 0)
+            # pacman -Qu exits 1 when there are simply no updates (not an error).
+            out=$(pacman -Qu 2>/dev/null) || true
+            printf '%s\n' "$out" | grep -c '.'
             ;;
         zypper)
-            count=$(zypper -q lu 2>/dev/null | grep -c "^v" || echo 0)
+            out=$(zypper -q lu 2>/dev/null); rc=$?
+            [[ $rc -ne 0 ]] && return 1
+            printf '%s\n' "$out" | grep -c '^v '
             ;;
         apk)
-            count=$(apk version -l '<' 2>/dev/null | wc -l || echo 0)
+            out=$(apk version -l '<' 2>/dev/null); rc=$?
+            [[ $rc -ne 0 ]] && return 1
+            # Drop apk's header line, then count remaining entries.
+            printf '%s\n' "$out" | grep -v '^Installed' | grep -c '.'
             ;;
         *)
             log_warning "Cannot check updates for unknown package manager"
             return 1
             ;;
     esac
-
-    echo "$count"
+    # grep -c already emits a clean "0" on no matches; its exit status is
+    # irrelevant to the count and is intentionally ignored.
+    return 0
 }
 
+# Print the number of available SECURITY updates. Returns 1 (printing nothing)
+# when it cannot be determined for the current package manager.
 get_security_update_count() {
-    local count=0
+    local out rc
 
     case "${OS_INFO[pkg_manager]}" in
         apt)
-            count=$(apt-get -s upgrade 2>/dev/null | grep -i security | grep -c "^Inst " || echo 0)
+            out=$(apt-get -s upgrade 2>/dev/null); rc=$?
+            [[ $rc -ne 0 ]] && return 1
+            # Security-origin lines contain the "-security" suite on the Inst line.
+            printf '%s\n' "$out" | grep '^Inst ' | grep -c -i 'security'
             ;;
         dnf)
-            count=$(dnf updateinfo list security --available 2>/dev/null | grep -c "^" || echo 0)
+            out=$(dnf -q updateinfo list --security --available 2>/dev/null); rc=$?
+            [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
+            # Count advisory rows only (lines beginning with a severity/advisory id).
+            printf '%s\n' "$out" | grep -c -E '^[A-Za-z]'
             ;;
         yum)
-            count=$(yum updateinfo list security 2>/dev/null | grep -c "^" || echo 0)
+            out=$(yum -q updateinfo list security 2>/dev/null); rc=$?
+            [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
+            printf '%s\n' "$out" | grep -c -E '^[A-Za-z]'
             ;;
         *)
-            # Fall back to total updates for other package managers
-            count=$(get_update_count)
+            # No reliable per-security query: fall back to the total update count.
+            get_update_count
             ;;
     esac
-
-    echo "$count"
+    return 0
 }
 
 # =============================================================================
@@ -677,13 +775,13 @@ get_running_services_count() {
             count=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | wc -l)
             ;;
         openrc)
-            count=$(rc-status -s 2>/dev/null | grep -c "started" || echo 0)
+            count=$(rc-status -s 2>/dev/null | grep -c "started" || true)
             ;;
         sysv)
-            count=$(service --status-all 2>/dev/null | grep -c " + " || echo 0)
+            count=$(service --status-all 2>/dev/null | grep -c " + " || true)
             ;;
         runit)
-            count=$(find /var/service -maxdepth 1 -type l 2>/dev/null | wc -l || echo 0)
+            count=$(find /var/service -maxdepth 1 -type l 2>/dev/null | count_lines)
             ;;
         *)
             log_warning "Cannot count services for unknown service manager"
@@ -730,48 +828,84 @@ get_uptime_since() {
     fi
 }
 
-get_memory_stats() {
-    local stat="$1"  # total, used, available, percent
+# Format a byte count as a compact human-readable string (e.g. "1.9G"),
+# mirroring `free -h`. Uses awk for the division so it works without bc and
+# under LC_ALL=C (period decimal separator).
+bytes_to_human() {
+    local bytes="${1:-0}"
+    is_numeric "$bytes" || { echo "?"; return; }
+    if   [[ $bytes -ge 1073741824 ]]; then awk -v b="$bytes" 'BEGIN{printf "%.1fG", b/1073741824}'
+    elif [[ $bytes -ge 1048576    ]]; then awk -v b="$bytes" 'BEGIN{printf "%.1fM", b/1048576}'
+    elif [[ $bytes -ge 1024       ]]; then awk -v b="$bytes" 'BEGIN{printf "%.1fK", b/1024}'
+    else echo "${bytes}B"; fi
+}
 
-    if command -v free &>/dev/null; then
-        case "$stat" in
-            total)
-                free -b 2>/dev/null | awk '/^Mem:/ {print $2}'
-                ;;
-            used)
-                free -b 2>/dev/null | awk '/^Mem:/ {print $3}'
-                ;;
-            available)
-                # Try column 7 first (available), fall back to free + buffers/cache
-                free -b 2>/dev/null | awk '/^Mem:/ {if (NF >= 7) print $7; else print $4 + $6}'
-                ;;
-            percent)
-                free 2>/dev/null | awk '/^Mem:/ {printf "%.0f", $3/$2 * 100}'
-                ;;
-            total_human)
-                free -h 2>/dev/null | awk '/^Mem:/ {print $2}'
-                ;;
-            used_human)
-                free -h 2>/dev/null | awk '/^Mem:/ {print $3}'
-                ;;
-            available_human)
-                free -h 2>/dev/null | awk '/^Mem:/ {if (NF >= 7) print $7; else print $4}'
-                ;;
-        esac
+get_memory_stats() {
+    local stat="$1"  # total|used|available|percent|*_human
+
+    # Read straight from /proc/meminfo (present on every Linux system). This
+    # avoids depending on `free`, whose -b/-h flags and column layout differ
+    # across GNU coreutils and BusyBox (Alpine), which previously left the
+    # byte/human values blank there.
+    local total_kb avail_kb free_kb buffers_kb cached_kb
+    if [[ -r /proc/meminfo ]]; then
+        total_kb=$(awk '/^MemTotal:/     {print $2; exit}' /proc/meminfo)
+        avail_kb=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)
+        free_kb=$(awk  '/^MemFree:/      {print $2; exit}' /proc/meminfo)
+        buffers_kb=$(awk '/^Buffers:/    {print $2; exit}' /proc/meminfo)
+        cached_kb=$(awk '/^Cached:/      {print $2; exit}' /proc/meminfo)
+    fi
+
+    total_kb=$(sanitize_int "$total_kb")
+    # MemAvailable is absent on very old kernels (<3.14): approximate it.
+    if ! is_numeric "$avail_kb"; then
+        avail_kb=$(( $(sanitize_int "$free_kb") + $(sanitize_int "$buffers_kb") + $(sanitize_int "$cached_kb") ))
+    fi
+    avail_kb=$(sanitize_int "$avail_kb")
+
+    local used_kb=$(( total_kb - avail_kb ))
+    [[ $used_kb -lt 0 ]] && used_kb=0
+
+    case "$stat" in
+        total)           echo $(( total_kb * 1024 )) ;;
+        used)            echo $(( used_kb  * 1024 )) ;;
+        available)       echo $(( avail_kb * 1024 )) ;;
+        percent)         if [[ $total_kb -gt 0 ]]; then echo $(( used_kb * 100 / total_kb )); else echo 0; fi ;;
+        total_human)     bytes_to_human $(( total_kb * 1024 )) ;;
+        used_human)      bytes_to_human $(( used_kb  * 1024 )) ;;
+        available_human) bytes_to_human $(( avail_kb * 1024 )) ;;
+    esac
+}
+
+# Print the number of CPU cores, or return 1 (printing nothing) if unknown.
+# Prefers nproc (honours cgroup/affinity limits) and falls back to counting
+# processor entries in /proc/cpuinfo. Never emits the "0\n1" double-value that
+# the previous `nproc || grep -c || echo 1` chain could produce.
+get_cpu_cores() {
+    local n=""
+    if has_command nproc; then
+        n=$(nproc 2>/dev/null || true)
+    fi
+    if ! is_numeric "$n" && [[ -r /proc/cpuinfo ]]; then
+        n=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || true)
+    fi
+    if is_numeric "$n" && [[ $n -gt 0 ]]; then
+        echo "$n"
+        return 0
+    fi
+    return 1
+}
+
+# Human-friendly elapsed run time since the script started (traceability).
+get_run_duration() {
+    local now elapsed
+    now=$(date +%s 2>/dev/null || echo "$SCRIPT_START_EPOCH")
+    elapsed=$(( now - SCRIPT_START_EPOCH ))
+    [[ $elapsed -lt 0 ]] && elapsed=0
+    if [[ $elapsed -ge 60 ]]; then
+        printf '%dm %ds' $(( elapsed / 60 )) $(( elapsed % 60 ))
     else
-        # Fallback to /proc/meminfo
-        case "$stat" in
-            total)
-                awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo
-                ;;
-            available)
-                awk '/MemAvailable/ {print $2 * 1024}' /proc/meminfo 2>/dev/null || \
-                awk '/MemFree/ {print $2 * 1024}' /proc/meminfo
-                ;;
-            percent)
-                awk '/MemTotal/ {total=$2} /MemAvailable/ {avail=$2} END {printf "%.0f", (total-avail)/total * 100}' /proc/meminfo
-                ;;
-        esac
+        printf '%ds' "$elapsed"
     fi
 }
 
@@ -858,7 +992,7 @@ check_security() {
 
     # Add to JSON output if enabled
     if [[ "${CONFIG[output_format]}" == "json" ]] || [[ "${CONFIG[output_format]}" == "both" ]]; then
-        add_json_result "$test_name" "$status" "$message"
+        add_json_result "$test_name" "$status" "$message" "$recommendation" "$is_critical"
     fi
 }
 
@@ -891,11 +1025,18 @@ add_json_result() {
     local test_name="$1"
     local status="$2"
     local message="$3"
+    local recommendation="${4:-}"
+    local is_critical="${5:-false}"
 
     test_name=$(json_escape "$test_name")
     message=$(json_escape "$message")
+    recommendation=$(json_escape "$recommendation")
 
-    local json_entry='{"name":"'"$test_name"'","status":"'"$status"'","message":"'"$message"'"}'
+    local crit="false"
+    [[ "$is_critical" == "true" && "$status" == "FAIL" ]] && crit="true"
+
+    local json_entry
+    json_entry='{"name":"'"$test_name"'","status":"'"$status"'","message":"'"$message"'","recommendation":"'"$recommendation"'","critical":'"$crit"'}'
 
     if [[ "$JSON_OUTPUT" == *'"checks":['* ]] && [[ "$JSON_OUTPUT" != *'"checks":[]'* ]] && [[ "${JSON_OUTPUT: -1}" != "[" ]]; then
         JSON_OUTPUT+=",$json_entry"
@@ -905,7 +1046,15 @@ add_json_result() {
 }
 
 finalize_json() {
-    JSON_OUTPUT+='],"summary":{"pass":'"$PASS_COUNT"',"warn":'"$WARN_COUNT"',"fail":'"$FAIL_COUNT"',"critical_fail":'"$CRITICAL_FAIL_COUNT"'}}'
+    local total=$((PASS_COUNT + WARN_COUNT + FAIL_COUNT))
+    local score=0
+    [[ $total -gt 0 ]] && score=$((PASS_COUNT * 100 / total))
+    local now duration_s
+    now=$(date +%s 2>/dev/null || echo "$SCRIPT_START_EPOCH")
+    duration_s=$(( now - SCRIPT_START_EPOCH ))
+    [[ $duration_s -lt 0 ]] && duration_s=0
+
+    JSON_OUTPUT+='],"summary":{"pass":'"$PASS_COUNT"',"warn":'"$WARN_COUNT"',"fail":'"$FAIL_COUNT"',"critical_fail":'"$CRITICAL_FAIL_COUNT"',"total":'"$total"',"score":'"$score"',"duration_seconds":'"$duration_s"'}}'
 
     if [[ "${CONFIG[output_format]}" == "json" ]] || [[ "${CONFIG[output_format]}" == "both" ]]; then
         local json_file="${REPORT_FILE%.txt}.json"
@@ -1163,9 +1312,14 @@ load_config() {
                 continue
             fi
 
-            # Config file should not be world-writable
-            if [[ "${file_perms: -1}" =~ [2367] ]]; then
-                log_warning "Ignoring config file $config_file - world-writable (insecure)"
+            # Config file must not be writable by group OR other: it is sourced
+            # (executed) as root, so any non-owner writer would gain arbitrary
+            # root code execution. The previous test inspected only the last
+            # octal digit and let a root-owned, group-writable file (e.g. mode
+            # 664) through. Mask against 022 to reject both group- and
+            # other-write bits.
+            if (( 8#${file_perms} & 022 )); then
+                log_warning "Ignoring config file $config_file - writable by group/other (insecure)"
                 continue
             fi
 
@@ -1199,35 +1353,109 @@ should_run_check() {
 # SSH CONFIGURATION CHECKS (Issues #5, #23, #24)
 # =============================================================================
 
+# Cache of the effective sshd configuration as produced by `sshd -T`.
+SSHD_EFFECTIVE_CONFIG=""
+SSHD_EFFECTIVE_LOADED="false"   # "false" until we have attempted to load
+SSHD_EFFECTIVE_OK="false"       # "true" only if sshd -T succeeded
+
+# Populate SSHD_EFFECTIVE_CONFIG from `sshd -T`, which resolves Include
+# directives, Match blocks, and version-specific defaults into a single
+# authoritative key/value listing (lowercased keys). This is far more reliable
+# than grepping sshd_config by hand. Loaded once and cached. Returns 0 on
+# success, 1 if sshd is unavailable or the config could not be dumped.
+load_sshd_effective_config() {
+    [[ "$SSHD_EFFECTIVE_LOADED" == "true" ]] && { [[ "$SSHD_EFFECTIVE_OK" == "true" ]]; return; }
+    SSHD_EFFECTIVE_LOADED="true"
+
+    local sshd_bin=""
+    if has_command sshd; then
+        sshd_bin="sshd"
+    else
+        local candidate
+        for candidate in /usr/sbin/sshd /sbin/sshd /usr/bin/sshd /usr/local/sbin/sshd; do
+            if [[ -x "$candidate" ]]; then sshd_bin="$candidate"; break; fi
+        done
+    fi
+    [[ -z "$sshd_bin" ]] && return 1
+
+    # `sshd -T` needs root and a parseable config. Try the plain form first;
+    # some configurations with Match blocks require a connection spec, so retry
+    # with a representative one before giving up.
+    local out
+    if out=$("$sshd_bin" -T 2>/dev/null) && [[ -n "$out" ]]; then
+        SSHD_EFFECTIVE_CONFIG="$out"
+        SSHD_EFFECTIVE_OK="true"
+        log_debug "Loaded effective SSH config via 'sshd -T'"
+        return 0
+    fi
+    if out=$("$sshd_bin" -T -C user=root,host=localhost,addr=127.0.0.1,lport=22 2>/dev/null) \
+       && [[ -n "$out" ]]; then
+        SSHD_EFFECTIVE_CONFIG="$out"
+        SSHD_EFFECTIVE_OK="true"
+        log_debug "Loaded effective SSH config via 'sshd -T -C ...'"
+        return 0
+    fi
+    log_debug "sshd -T unavailable; falling back to manual sshd_config parsing"
+    return 1
+}
+
 get_ssh_config() {
     local setting="$1"
     local default="$2"
     local value=""
     local config_files=()
 
+    # Preferred path: authoritative effective configuration from `sshd -T`.
+    # Keys in that output are lowercase; values may contain spaces (e.g. lists).
+    if load_sshd_effective_config; then
+        local key="${setting,,}"
+        value=$(printf '%s\n' "$SSHD_EFFECTIVE_CONFIG" | \
+            awk -v k="$key" 'tolower($1)==k { $1=""; sub(/^[ \t]+/,""); print; exit }')
+        if [[ -n "$value" ]]; then
+            log_debug "sshd -T: $setting = $value"
+            echo "$value"
+            return 0
+        fi
+        # sshd -T succeeded but the key is absent (option unset, e.g. AllowUsers):
+        # the documented default is correct, so return it without manual parsing.
+        echo "$default"
+        return 0
+    fi
+
+    # Fallback: best-effort manual parse (does not understand Match blocks).
     # Check for Include directives in main config
     local include_pattern
     include_pattern=$(grep -h "^Include" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
 
     if [[ -n "$include_pattern" ]]; then
-        local dir
+        local dir base file
         dir=$(dirname "$include_pattern" 2>/dev/null)
+        base=$(basename "$include_pattern" 2>/dev/null)
 
         if [[ -d "$dir" ]]; then
-            # Expand glob pattern safely
-            while IFS= read -r -d '' file; do
+            # Expand the Include glob with bash pathname expansion (already
+            # sorted, and portable - avoids the GNU-only `find -print0 | sort -z`
+            # that older BusyBox lacks). $base is intentionally unquoted so the
+            # glob expands; non-matches are filtered out by the -f test.
+            # shellcheck disable=SC2231  # deliberate glob expansion of $base
+            for file in "$dir"/$base; do
                 [[ -f "$file" ]] && config_files+=("$file")
-            done < <(find "$dir" -maxdepth 1 -type f -name "$(basename "$include_pattern")" -print0 2>/dev/null | sort -z)
+            done
         fi
     fi
 
     # Add main config file
     config_files+=("/etc/ssh/sshd_config")
 
-    # Search through files for the setting (first match wins)
+    # Search through files for the setting (first match wins). Only the GLOBAL
+    # scope is considered: awk stops at the first `Match` line so a directive
+    # that applies only to a specific user/host/subnet is not mistaken for the
+    # global value. (The sshd -T path above already resolves this correctly;
+    # this guard hardens the manual fallback.)
     for config in "${config_files[@]}"; do
         if [[ -f "$config" ]] && [[ -r "$config" ]]; then
-            value=$(grep -i "^[[:space:]]*${setting}[[:space:]]" "$config" 2>/dev/null | head -1 | awk '{print $2}')
+            value=$(awk 'tolower($1)=="match"{exit} 1' "$config" 2>/dev/null \
+                | grep -i "^[[:space:]]*${setting}[[:space:]]" | head -1 | awk '{print $2}')
             if [[ -n "$value" ]]; then
                 log_debug "Found $setting=$value in $config"
                 echo "$value"
@@ -1353,8 +1581,8 @@ check_firewall_status() {
         firewall_found=true
         firewall_name="nftables"
         local rule_count
-        rule_count=$(nft list ruleset 2>/dev/null | grep -c "chain" || echo 0)
-        if [[ $rule_count -gt 0 ]]; then
+        rule_count=$(nft list ruleset 2>/dev/null | grep -c "chain" || true)
+        if [[ ${rule_count:-0} -gt 0 ]]; then
             firewall_active=true
         fi
     fi
@@ -1364,9 +1592,9 @@ check_firewall_status() {
         firewall_found=true
         firewall_name="iptables"
 
-        # Count actual rules in INPUT chain (excluding header lines)
+        # Count actual rules in INPUT chain (excluding the 2 header lines)
         local input_rules
-        input_rules=$(iptables -L INPUT -n --line-numbers 2>/dev/null | tail -n +3 | wc -l || echo 0)
+        input_rules=$(iptables -L INPUT -n --line-numbers 2>/dev/null | tail -n +3 | count_lines)
 
         # Check if default policy is DROP/REJECT (use portable POSIX sed, not grep -P)
         local input_policy
@@ -1534,25 +1762,23 @@ check_failed_logins() {
 
     local failed_count=0
     local log_source=""
+    local journal_ok=false
 
-    # Try journalctl first (most reliable on systemd)
-    if [[ "${OS_INFO[service_manager]}" == "systemd" ]] && command -v journalctl &>/dev/null; then
+    # Prefer the systemd journal when it is actually READABLE. Probing with
+    # `journalctl -n0` first means a legitimate zero count is trusted instead of
+    # falling through and falsely warning "unable to read logs" on a
+    # journald-only host that has no /var/log/auth.log.
+    if [[ "${OS_INFO[service_manager]}" == "systemd" ]] && has_command journalctl \
+       && journalctl -n0 &>/dev/null; then
+        journal_ok=true
         failed_count=$(journalctl -u sshd -u ssh --since "24 hours ago" 2>/dev/null | \
-            grep -c "Failed password" 2>/dev/null || echo "0")
-        # Clean up the count - remove any whitespace/newlines
-        failed_count=$(echo "$failed_count" | tr -d '[:space:]')
-        if is_numeric "$failed_count" && [[ $failed_count -gt 0 ]]; then
-            log_source="journalctl (last 24h)"
-        fi
+            grep -c "Failed password" || true)
+        failed_count=$(sanitize_int "$failed_count")
+        log_source="journalctl (last 24h)"
     fi
 
-    # Ensure failed_count is valid before comparison
-    if ! is_numeric "$failed_count"; then
-        failed_count=0
-    fi
-
-    # Fall back to log files if journalctl didn't find anything
-    if [[ $failed_count -eq 0 ]]; then
+    # Fall back to text logs only when the journal was not usable.
+    if [[ "$journal_ok" == "false" ]]; then
         local log_files=(
             "${OS_INFO[auth_log]}"
             "/var/log/auth.log"
@@ -1560,27 +1786,28 @@ check_failed_logins() {
             "/var/log/messages"
         )
 
+        # Compute today's syslog date once. %e space-pads single-digit days, so
+        # syslog writes "Jul  5" (two spaces); we match one-or-more spaces
+        # between month and day instead of an exact string. The previous
+        # `sed 's/  / /'` collapsed the padding and silently matched NOTHING on
+        # days 1-9, undercounting failed logins to zero (a false PASS).
+        local mon day
+        mon=$(date +%b)
+        day=$(date +%e | tr -d ' ')
         for log_file in "${log_files[@]}"; do
-            if [[ -f "$log_file" ]] && [[ -r "$log_file" ]]; then
-                # Get today's entries only
-                local today
-                today=$(date +"%b %e" | sed 's/  / /')
-                failed_count=$(grep "$today" "$log_file" 2>/dev/null | grep -c "Failed password" 2>/dev/null || echo "0")
-                failed_count=$(echo "$failed_count" | tr -d '[:space:]')
-                if ! is_numeric "$failed_count"; then
-                    failed_count=0
-                fi
-                if [[ $failed_count -gt 0 ]] || [[ -f "$log_file" ]]; then
-                    log_source="$log_file (today)"
-                    break
-                fi
+            if [[ -n "$log_file" ]] && [[ -f "$log_file" ]] && [[ -r "$log_file" ]]; then
+                failed_count=$(grep -E "^${mon}[[:space:]]+${day}[[:space:]]" "$log_file" 2>/dev/null \
+                    | grep -c "Failed password" || true)
+                failed_count=$(sanitize_int "$failed_count")
+                log_source="$log_file (today)"
+                break
             fi
         done
     fi
 
     if [[ -z "$log_source" ]]; then
         check_security "Failed Logins" "WARN" "Unable to read authentication logs" \
-            "Check log file permissions"
+            "Run as root, or check log/journal access permissions"
         return
     fi
 
@@ -1625,19 +1852,41 @@ check_running_services() {
 # PORT SECURITY CHECK (Issue #20)
 # =============================================================================
 
+# Classify a listen/bind address as network-reachable ("public") or not
+# ("local"). Input is a bare address with any IPv6 brackets already stripped.
+# Loopback (including 127.0.0.53 from systemd-resolved), RFC1918, link-local,
+# and unique-local ranges are "local"; wildcard binds and routable addresses
+# are "public". Kept as a standalone pure function so it is unit-testable.
+classify_bind_scope() {
+    local addr="$1"
+    case "$addr" in
+        127.*|::1|localhost|"")        echo "local";  return ;;
+        0.0.0.0|::|\*|::ffff:0.0.0.0)  echo "public"; return ;;
+    esac
+    if [[ "$addr" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.|fe80:|f[cd]) ]]; then
+        echo "local"
+    else
+        echo "public"
+    fi
+}
+
 check_open_ports() {
     should_run_check "ports" || return 0
 
-    local listening_info=""
+    local listening_info="" col=5
 
-    # Get listening ports (prefer ss over netstat)
-    if command -v ss &>/dev/null; then
-        listening_info=$(ss -tuln state listening 2>/dev/null)
-    elif command -v netstat &>/dev/null; then
-        listening_info=$(netstat -tuln 2>/dev/null | grep LISTEN)
+    # Get listening sockets (prefer ss over netstat). We intentionally do NOT
+    # pass `state listening` to ss: that state filter drops UDP sockets (which
+    # are connectionless / UNCONN), silently hiding open UDP ports such as DNS,
+    # NTP, or WireGuard. `-l` already restricts output to listening TCP and
+    # bound UDP sockets, which is precisely what a port audit needs.
+    if has_command ss; then
+        listening_info=$(ss -tuln 2>/dev/null); col=5
+    elif has_command netstat; then
+        listening_info=$(netstat -tuln 2>/dev/null); col=4
     else
         check_security "Port Security" "WARN" "Neither ss nor netstat available" \
-            "Install iproute2 or net-tools"
+            "Install iproute2 (ss) or net-tools (netstat)"
         return
     fi
 
@@ -1646,62 +1895,34 @@ check_open_ports() {
         return
     fi
 
-    # Parse and categorize ports
+    # Parse and categorize ports. A single awk pass extracts the local
+    # address:port column; the loop then splits and classifies each entry with
+    # pure bash parameter expansion (no per-line subshells).
     local -A localhost_ports=()
     local -A public_ports=()
     local -A all_ports=()
 
-    while read -r line; do
-        # Skip header lines and blank lines
-        # Use explicit if to avoid &&/|| precedence ambiguity
-        [[ -z "$line" ]] && continue
-        if [[ "$line" =~ ^(Netid|Proto|State) ]]; then
-            continue
-        fi
+    local listen_addr addr port
+    while read -r listen_addr; do
+        [[ -z "$listen_addr" ]] && continue
 
-        local addr="" port=""
+        # Split "address:port" on the LAST colon (correct for IPv4 and [IPv6]).
+        port="${listen_addr##*:}"
+        addr="${listen_addr%:*}"
+        # Strip IPv6 brackets so the classification patterns anchor correctly.
+        addr="${addr#\[}"; addr="${addr%\]}"
 
-        # Parse address:port - handle various formats
-        # ss format: *:22, 0.0.0.0:22, [::]:22, 127.0.0.1:22
-        # netstat format: 0.0.0.0:22, :::22, 127.0.0.1:22
-
-        local listen_addr
-        if command -v ss &>/dev/null; then
-            listen_addr=$(echo "$line" | awk '{print $5}')
-        else
-            listen_addr=$(echo "$line" | awk '{print $4}')
-        fi
-
-        # Extract port (last number after last colon)
-        port=$(echo "$listen_addr" | rev | cut -d: -f1 | rev)
-
-        # Extract address (everything before last colon)
-        addr=$(echo "$listen_addr" | rev | cut -d: -f2- | rev)
-
-        # Skip if port is not numeric
+        # Header rows and malformed entries yield a non-numeric port -> skip.
         is_numeric "$port" || continue
 
         all_ports[$port]=1
 
-        # Categorize by binding address
-        case "$addr" in
-            127.0.0.1|::1|\[::1\]|localhost)
-                localhost_ports[$port]=1
-                ;;
-            0.0.0.0|\[::\]|::|\[::ffff:0.0.0.0\])
-                # All-zeros addresses mean listening on all interfaces (public)
-                public_ports[$port]=1
-                ;;
-            *)
-                # Check if it's a private network address
-                if [[ "$addr" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|fe80:|fc|fd) ]]; then
-                    localhost_ports[$port]=1
-                else
-                    public_ports[$port]=1
-                fi
-                ;;
-        esac
-    done <<< "$listening_info"
+        if [[ "$(classify_bind_scope "$addr")" == "public" ]]; then
+            public_ports[$port]=1
+        else
+            localhost_ports[$port]=1
+        fi
+    done < <(printf '%s\n' "$listening_info" | awk -v c="$col" '{print $c}')
 
     local total_count=${#all_ports[@]}
     local public_count=${#public_ports[@]}
@@ -1737,8 +1958,11 @@ check_open_ports() {
 check_disk_usage() {
     should_run_check "resources" || return 0
 
+    # -P forces POSIX one-line-per-filesystem output; without it, a long device
+    # name (LVM /dev/mapper/..., ZFS, overlay) wraps onto a second physical line
+    # and `awk NR==2` would read the wrapped name instead of the data row.
     local disk_info
-    disk_info=$(df -h / 2>/dev/null | awk 'NR==2')
+    disk_info=$(df -hP / 2>/dev/null | awk 'NR==2')
 
     if [[ -z "$disk_info" ]]; then
         check_security "Disk Usage" "WARN" "Unable to determine disk usage" ""
@@ -1809,9 +2033,12 @@ check_cpu_usage() {
         # /proc/stat fields: cpu user nice system idle iowait irq softirq steal ...
         # active = user+nice+system+irq+softirq+steal (fields 2,3,4,7,8,9)
         # idle   = idle+iowait                        (fields 5,6)
+        # Sample /proc/stat twice with a 1-second gap. A full second (rather than
+        # a fractional sleep, which some BusyBox builds do not support) keeps the
+        # two samples distinct so the deltas below are meaningful.
         local cpu1 cpu2
         cpu1=$(head -1 /proc/stat | awk '{print $2+$3+$4+$7+$8+$9, $5+$6}')
-        sleep 0.5
+        sleep 1
         cpu2=$(head -1 /proc/stat | awk '{print $2+$3+$4+$7+$8+$9, $5+$6}')
 
         local active1 idle1 active2 idle2
@@ -1836,7 +2063,7 @@ check_cpu_usage() {
     fi
 
     local cpu_cores load_avg
-    cpu_cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
+    cpu_cores=$(get_cpu_cores || echo 1)
     load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')
 
     local message="${cpu_usage}% used (Cores: ${cpu_cores}, Load: ${load_avg:-?})"
@@ -1897,69 +2124,77 @@ check_sudo_logging() {
 # PASSWORD POLICY CHECK (Issue #30)
 # =============================================================================
 
+# Resolve a pwquality setting (minlen, dcredit, ...) from every place a distro
+# may configure it: /etc/security/pwquality.conf, its .conf.d drop-ins, and
+# inline pam_pwquality / pam_cracklib arguments in /etc/pam.d/*. Prints the
+# effective value (last definition wins), or nothing if unset. This avoids a
+# false "weak policy" verdict on systems that configure complexity via PAM
+# arguments rather than the pwquality.conf file.
+get_pwquality_setting() {
+    local name="$1" value="" f v
+    local files=()
+    [[ -f /etc/security/pwquality.conf ]] && files+=(/etc/security/pwquality.conf)
+    if [[ -d /etc/security/pwquality.conf.d ]]; then
+        for f in /etc/security/pwquality.conf.d/*.conf; do
+            [[ -f "$f" ]] && files+=("$f")
+        done
+    fi
+    for f in "${files[@]}"; do
+        [[ -r "$f" ]] || continue
+        v=$(grep -E "^[[:space:]]*${name}[[:space:]]*=" "$f" 2>/dev/null \
+            | tail -1 | cut -d= -f2 | tr -d '[:space:]')
+        [[ -n "$v" ]] && value="$v"
+    done
+    if [[ -d /etc/pam.d ]]; then
+        v=$(grep -rhE "pam_(pwquality|cracklib)\.so" /etc/pam.d/ 2>/dev/null \
+            | grep -oE "${name}=-?[0-9]+" | tail -1 | cut -d= -f2)
+        [[ -n "$v" ]] && value="$v"
+    fi
+    echo "$value"
+}
+
 check_password_policy() {
     should_run_check "password" || return 0
 
     local policy_score=0
     local max_score=5
     local issues=()
+    local found_config=false
 
-    # Check pwquality.conf
-    if [[ -f "/etc/security/pwquality.conf" ]]; then
-        local minlen
-        minlen=$(grep "^minlen" /etc/security/pwquality.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
+    # pwquality uses negative "credit" values to REQUIRE a character class
+    # (e.g. dcredit=-1 means at least one digit). is_numeric() rejects the minus
+    # sign, so complexity checks use is_integer().
+    local minlen dcredit ucredit lcredit ocredit
+    minlen=$(get_pwquality_setting minlen)
+    dcredit=$(get_pwquality_setting dcredit)
+    ucredit=$(get_pwquality_setting ucredit)
+    lcredit=$(get_pwquality_setting lcredit)
+    ocredit=$(get_pwquality_setting ocredit)
 
-        if is_numeric "$minlen" && [[ $minlen -ge 12 ]]; then
-            ((policy_score++)) || true
-        else
-            issues+=("minlen<12")
-        fi
+    [[ -n "${minlen}${dcredit}${ucredit}${lcredit}${ocredit}" ]] && found_config=true
 
-        # Check complexity requirements: pwquality uses negative values to require a character
-        # class (e.g., dcredit=-1 means at least one digit required).  is_numeric() only
-        # matches non-negative integers, so use is_integer() here to handle the minus sign.
-        local dcredit ucredit lcredit ocredit
-        dcredit=$(grep "^dcredit" /etc/security/pwquality.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
-        ucredit=$(grep "^ucredit" /etc/security/pwquality.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
-        lcredit=$(grep "^lcredit" /etc/security/pwquality.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
-        ocredit=$(grep "^ocredit" /etc/security/pwquality.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
-
-        if is_integer "$dcredit" && [[ $dcredit -lt 0 ]]; then
-            ((policy_score++)) || true
-        else
-            issues+=("no-digit-req")
-        fi
-
-        if is_integer "$ucredit" && [[ $ucredit -lt 0 ]]; then
-            ((policy_score++)) || true
-        else
-            issues+=("no-upper-req")
-        fi
-
-        if is_integer "$lcredit" && [[ $lcredit -lt 0 ]]; then
-            ((policy_score++)) || true
-        else
-            issues+=("no-lower-req")
-        fi
-
-        if is_integer "$ocredit" && [[ $ocredit -lt 0 ]]; then
-            ((policy_score++)) || true
-        else
-            issues+=("no-special-req")
-        fi
+    if is_numeric "$minlen" && [[ $minlen -ge 12 ]]; then
+        ((policy_score++)) || true
     else
-        issues+=("pwquality.conf-missing")
+        issues+=("minlen<12")
     fi
+    if is_integer "$dcredit" && [[ $dcredit -lt 0 ]]; then ((policy_score++)) || true; else issues+=("no-digit-req"); fi
+    if is_integer "$ucredit" && [[ $ucredit -lt 0 ]]; then ((policy_score++)) || true; else issues+=("no-upper-req"); fi
+    if is_integer "$lcredit" && [[ $lcredit -lt 0 ]]; then ((policy_score++)) || true; else issues+=("no-lower-req"); fi
+    if is_integer "$ocredit" && [[ $ocredit -lt 0 ]]; then ((policy_score++)) || true; else issues+=("no-special-req"); fi
 
     # Report results
     if [[ $policy_score -ge 4 ]]; then
         check_security "Password Policy" "PASS" "Strong password policy (score: $policy_score/$max_score)" ""
     elif [[ $policy_score -ge 2 ]]; then
         check_security "Password Policy" "WARN" "Moderate password policy (score: $policy_score/$max_score)" \
-            "Configure /etc/security/pwquality.conf: ${issues[*]}"
+            "Tune password complexity: ${issues[*]}"
+    elif [[ "$found_config" == "true" ]]; then
+        check_security "Password Policy" "WARN" "Weak password policy (score: $policy_score/$max_score)" \
+            "Strengthen pwquality: ${issues[*]}"
     else
-        check_security "Password Policy" "FAIL" "Weak password policy" \
-            "Install libpam-pwquality and configure password requirements"
+        check_security "Password Policy" "FAIL" "No password quality policy detected" \
+            "Install libpam-pwquality and set minlen>=12 with complexity (dcredit/ucredit/lcredit/ocredit=-1)"
     fi
 }
 
@@ -1988,6 +2223,7 @@ check_suid_files() {
         "/usr/lib/dbus-1.0/dbus-daemon-launch-helper"
         "/usr/lib/openssh/ssh-keysign"
         "/usr/lib/policykit-1/polkit-agent-helper-1"
+        "/usr/lib/polkit-1/polkit-agent-helper-1"
         "/usr/libexec/polkit-agent-helper-1"
         "/usr/sbin/pppd" "/usr/sbin/unix_chkpwd" "/usr/sbin/postdrop"
         "/usr/sbin/postqueue"
@@ -1996,18 +2232,23 @@ check_suid_files() {
         "/sbin/unix_chkpwd"
     )
 
-    # Build exclusion pattern
-    local exclude_pattern
-    exclude_pattern=$(printf "|%s" "${known_safe_suid[@]}")
-    exclude_pattern="(${exclude_pattern:1})$"
+    # Exact-match set of known-safe binaries. An associative-array lookup (not a
+    # regex) is used deliberately: the previous suffix-anchored pattern
+    # `(...|/bin/su)$` would also match a PLANTED binary that merely ends in a
+    # safe path, e.g. /opt/evil/bin/su, and silently exclude it from the report
+    # (a security false-negative). Full-path exact matching cannot be evaded.
+    local -A safe_suid=()
+    local safe
+    for safe in "${known_safe_suid[@]}"; do
+        safe_suid["$safe"]=1
+    done
 
     # Find SUID files, using -xdev to stay on same filesystem (Issue #8)
     local suspicious_suid=()
     while IFS= read -r file; do
-        # Use bash regex to avoid fork+exec overhead and UUOC anti-pattern
-        if [[ -n "$file" ]] && ! [[ "$file" =~ $exclude_pattern ]]; then
-            suspicious_suid+=("$file")
-        fi
+        [[ -z "$file" ]] && continue
+        [[ -n "${safe_suid[$file]+x}" ]] && continue
+        suspicious_suid+=("$file")
     done < <(find / -xdev -type f -perm -4000 2>/dev/null)
 
     clear_progress
@@ -2202,7 +2443,7 @@ check_world_writable() {
 
     local ww_dir_count=0
     if [[ -n "$ww_dirs" ]]; then
-        ww_dir_count=$(echo "$ww_dirs" | grep -c "^/" || echo 0)
+        ww_dir_count=$(printf '%s\n' "$ww_dirs" | grep -c "^/" || true)
     fi
 
     clear_progress
@@ -2268,7 +2509,7 @@ check_audit_system() {
         if service_is_active auditd; then
             local rule_count=0
             if command -v auditctl &>/dev/null; then
-                rule_count=$(auditctl -l 2>/dev/null | grep -c "^-" || echo 0)
+                rule_count=$(auditctl -l 2>/dev/null | grep -c "^-" || true)
             fi
 
             if [[ $rule_count -gt 0 ]]; then
@@ -2292,29 +2533,54 @@ check_core_dumps() {
     should_run_check "core" || return 0
 
     local core_disabled=false
+    local detail=""
 
-    # Check ulimit
+    # 1. Hard ulimit of 0 (cannot be raised by a process).
     local core_limit
-    core_limit=$(ulimit -c 2>/dev/null || echo "unknown")
-
+    core_limit=$(ulimit -Hc 2>/dev/null || echo "unknown")
     if [[ "$core_limit" == "0" ]]; then
         core_disabled=true
+        detail="ulimit"
     fi
 
-    # Check /etc/security/limits.conf
-    if grep -qE "^\*[[:space:]]+hard[[:space:]]+core[[:space:]]+0" /etc/security/limits.conf 2>/dev/null; then
+    # 2. "<domain> hard core 0" in limits.conf or any limits.d drop-in.
+    local limit_files=(/etc/security/limits.conf)
+    if [[ -d /etc/security/limits.d ]]; then
+        local lf
+        for lf in /etc/security/limits.d/*.conf; do
+            [[ -f "$lf" ]] && limit_files+=("$lf")
+        done
+    fi
+    if grep -qhE "^[[:space:]]*[^#[:space:]]+[[:space:]]+hard[[:space:]]+core[[:space:]]+0([[:space:]]|$)" \
+        "${limit_files[@]}" 2>/dev/null; then
         core_disabled=true
+        detail="${detail:+$detail, }limits.conf"
     fi
 
-    # Check sysctl
+    # 3. systemd-coredump configured not to store dumps.
+    if [[ -f /etc/systemd/coredump.conf ]] && \
+       grep -qE "^[[:space:]]*Storage[[:space:]]*=[[:space:]]*none" \
+            /etc/systemd/coredump.conf 2>/dev/null; then
+        core_disabled=true
+        detail="${detail:+$detail, }systemd-coredump"
+    fi
+
+    # fs.suid_dumpable=0 only stops SETUID programs from dumping. It is the
+    # kernel default and does NOT restrict core dumps generally, so - unlike the
+    # previous version - it must not on its own produce a PASS (that was a
+    # near-permanent false PASS).
     local suid_dumpable
     suid_dumpable=$(sysctl -n fs.suid_dumpable 2>/dev/null || echo "")
 
-    if [[ "$core_disabled" == "true" ]] || [[ "$suid_dumpable" == "0" ]]; then
-        check_security "Core Dumps" "PASS" "Core dumps are restricted" ""
+    if [[ "$core_disabled" == "true" ]]; then
+        check_security "Core Dumps" "PASS" "Core dumps are restricted (${detail})" ""
+    elif [[ "$suid_dumpable" == "0" ]]; then
+        check_security "Core Dumps" "WARN" \
+            "Setuid dumps disabled (suid_dumpable=0) but general core dumps are unrestricted" \
+            "Add '* hard core 0' to /etc/security/limits.conf (or Storage=none in coredump.conf)"
     else
         check_security "Core Dumps" "WARN" "Core dumps may be enabled" \
-            "Disable core dumps to prevent sensitive data leakage"
+            "Disable core dumps to prevent sensitive data leakage ('* hard core 0' in limits.conf)"
     fi
 }
 
@@ -2385,16 +2651,18 @@ check_sgid_files() {
         "/usr/sbin/unix_chkpwd" "/usr/sbin/postdrop" "/usr/sbin/postqueue"
     )
 
-    local exclude_pattern
-    exclude_pattern=$(printf "|%s" "${known_safe_sgid[@]}")
-    exclude_pattern="(${exclude_pattern:1})$"
+    # Exact-match set (see check_suid_files for why a regex is unsafe here).
+    local -A safe_sgid=()
+    local safe
+    for safe in "${known_safe_sgid[@]}"; do
+        safe_sgid["$safe"]=1
+    done
 
     local suspicious_sgid=()
     while IFS= read -r file; do
-        # Use bash regex to avoid fork+exec overhead and UUOC anti-pattern
-        if [[ -n "$file" ]] && ! [[ "$file" =~ $exclude_pattern ]]; then
-            suspicious_sgid+=("$file")
-        fi
+        [[ -z "$file" ]] && continue
+        [[ -n "${safe_sgid[$file]+x}" ]] && continue
+        suspicious_sgid+=("$file")
     done < <(find / -xdev -type f -perm -2000 2>/dev/null)
 
     clear_progress
@@ -2748,7 +3016,7 @@ check_wireless_interfaces() {
 
     # Check for wireless interfaces
     if command -v iw &>/dev/null; then
-        wireless_count=$(iw dev 2>/dev/null | grep -c "Interface" || echo 0)
+        wireless_count=$(iw dev 2>/dev/null | grep -c "Interface" || true)
     elif [[ -d /sys/class/net ]]; then
         for iface in /sys/class/net/*; do
             if [[ -d "$iface/wireless" ]]; then
@@ -2797,7 +3065,10 @@ check_usb_storage() {
 check_compiler_access() {
     should_run_check "system" || return 0
 
-    local compilers=("gcc" "g++" "cc" "clang" "make" "as" "ld")
+    # Only real compilers. Deliberately excludes `as`/`ld` (binutils, present on
+    # almost every system for routine linking) and `make` (a build tool, not a
+    # compiler) - including them made this check fire on virtually every host.
+    local compilers=("gcc" "g++" "cc" "clang" "tcc")
     local found_compilers=()
 
     for compiler in "${compilers[@]}"; do
@@ -2808,12 +3079,9 @@ check_compiler_access() {
 
     if [[ ${#found_compilers[@]} -eq 0 ]]; then
         check_security "Compiler Access" "PASS" "No compilers found (good for production)" ""
-    elif [[ ${#found_compilers[@]} -lt 3 ]]; then
-        check_security "Compiler Access" "WARN" "Compilers found: ${found_compilers[*]}" \
-            "Consider removing compilers from production servers"
     else
-        check_security "Compiler Access" "WARN" "Multiple compilers installed: ${found_compilers[*]}" \
-            "Remove development tools from production systems"
+        check_security "Compiler Access" "WARN" "Compiler(s) available: ${found_compilers[*]}" \
+            "On a production server, consider removing build toolchains to reduce attack surface"
     fi
 }
 
@@ -2959,8 +3227,8 @@ check_sudoers_security() {
     # Scan /etc/sudoers for NOPASSWD
     if [[ -r /etc/sudoers ]]; then
         local nopasswd_count
-        nopasswd_count=$(grep -v "^[[:space:]]*#" /etc/sudoers 2>/dev/null | grep -c "NOPASSWD" || echo 0)
-        if [[ $nopasswd_count -gt 0 ]]; then
+        nopasswd_count=$(grep -v "^[[:space:]]*#" /etc/sudoers 2>/dev/null | grep -c "NOPASSWD" || true)
+        if [[ ${nopasswd_count:-0} -gt 0 ]]; then
             local nopasswd_entries
             nopasswd_entries=$(grep -v "^[[:space:]]*#" /etc/sudoers 2>/dev/null | \
                                grep "NOPASSWD" | awk '{print $1}' | tr '\n' ' ')
@@ -2974,8 +3242,8 @@ check_sudoers_security() {
             [[ -r "$sudoers_file" ]] || continue
             local file_nopasswd
             file_nopasswd=$(grep -v "^[[:space:]]*#" "$sudoers_file" 2>/dev/null | \
-                            grep -c "NOPASSWD" || echo 0)
-            if [[ $file_nopasswd -gt 0 ]]; then
+                            grep -c "NOPASSWD" || true)
+            if [[ ${file_nopasswd:-0} -gt 0 ]]; then
                 issues+=("NOPASSWD in ${sudoers_file##*/} ($file_nopasswd entries)")
             fi
         done < <(find /etc/sudoers.d -maxdepth 1 -type f 2>/dev/null)
@@ -3059,10 +3327,14 @@ check_file_integrity_monitoring() {
             [[ -f "$db_path" ]] && { aide_db="$db_path"; break; }
         done
         if [[ -n "$aide_db" ]]; then
-            local db_mtime db_age_days
-            db_mtime=$(date -r "$aide_db" +%s 2>/dev/null || echo 0)
-            db_age_days=$(( ($(date +%s) - db_mtime) / 86400 ))
-            [[ $db_age_days -le 7 ]] && fim_recent=true
+            local db_mtime db_age_days now
+            db_mtime=$(portable_stat mtime "$aide_db")
+            db_mtime=$(sanitize_int "$db_mtime")
+            now=$(date +%s 2>/dev/null || echo 0)
+            if [[ $db_mtime -gt 0 && $now -gt 0 ]]; then
+                db_age_days=$(( (now - db_mtime) / 86400 ))
+                [[ $db_age_days -le 7 ]] && fim_recent=true
+            fi
         fi
     fi
 
@@ -3119,10 +3391,13 @@ check_rootkit_detection() {
         # Log recency check (within 7 days)
         local rk_log="/var/log/rkhunter.log"
         if [[ -f "$rk_log" ]]; then
-            local log_mtime log_age
-            log_mtime=$(date -r "$rk_log" +%s 2>/dev/null || echo 0)
-            log_age=$(( ($(date +%s) - log_mtime) / 86400 ))
-            [[ $log_age -le 7 ]] && rk_recent=true
+            local log_mtime log_age now
+            log_mtime=$(sanitize_int "$(portable_stat mtime "$rk_log")")
+            now=$(date +%s 2>/dev/null || echo 0)
+            if [[ $log_mtime -gt 0 && $now -gt 0 ]]; then
+                log_age=$(( (now - log_mtime) / 86400 ))
+                [[ $log_age -le 7 ]] && rk_recent=true
+            fi
         fi
     fi
 
@@ -3155,27 +3430,47 @@ check_legacy_services() {
 
     local found_legacy=()
 
-    local legacy_services=(
-        telnet telnetd rsh rshd rlogin rlogind rexec rexecd
-        finger fingerd tftp tftpd talk talkd ntalkd
+    # Server DAEMONS only. The presence of a plaintext-protocol server is the
+    # real risk; client binaries (telnet, rsh, finger) are common, harmless
+    # admin tools and are intentionally NOT flagged to avoid false positives.
+    local legacy_daemons=(
+        telnetd in.telnetd rshd in.rshd rlogind in.rlogind
+        rexecd in.rexecd fingerd in.fingerd tftpd in.tftpd
+        talkd in.talkd ntalkd
     )
-
-    for svc in "${legacy_services[@]}"; do
-        if command -v "$svc" &>/dev/null || pkg_installed "$svc"; then
+    local svc
+    for svc in "${legacy_daemons[@]}"; do
+        if command -v "$svc" &>/dev/null; then
             found_legacy+=("$svc")
         fi
     done
 
+    # Also detect installed server PACKAGES: an xinetd-launched daemon may not
+    # be on PATH. Package names vary across distro families, so probe several.
+    local legacy_pkgs=(
+        telnet-server inetutils-telnetd krb5-telnet
+        rsh-server rsh-redone-server
+        finger-server efingerd
+        tftp-server tftpd-hpa atftpd
+        talk-server
+    )
+    local pkg
+    for pkg in "${legacy_pkgs[@]}"; do
+        if pkg_installed "$pkg"; then
+            found_legacy+=("$pkg")
+        fi
+    done
+
     if [[ ${#found_legacy[@]} -eq 0 ]]; then
-        check_security "Legacy Services" "PASS" "No legacy plaintext services found" ""
+        check_security "Legacy Services" "PASS" "No legacy plaintext service daemons found" ""
     elif [[ ${#found_legacy[@]} -le 2 ]]; then
         check_security "Legacy Services" "WARN" \
-            "Legacy plaintext service(s) found: ${found_legacy[*]}" \
-            "Remove legacy services — they transmit credentials in plaintext"
+            "Legacy plaintext service daemon(s) present: ${found_legacy[*]}" \
+            "Remove these servers — they transmit credentials in cleartext (use SSH/SFTP instead)"
     else
         check_security "Legacy Services" "FAIL" \
-            "Multiple legacy plaintext services present: ${found_legacy[*]}" \
-            "Remove all legacy services immediately (telnet/rsh/rlogin/finger/tftp)"
+            "Multiple legacy plaintext service daemons present: ${found_legacy[*]}" \
+            "Remove all legacy servers immediately (telnetd/rshd/rlogind/fingerd/tftpd)"
     fi
 }
 
@@ -3383,8 +3678,10 @@ check_home_directory_permissions() {
         local world_bit="${perms: -1}"
         if [[ "$world_bit" =~ [2367] ]]; then
             issues+=("$homedir ($username) world-writable: $perms")
-        elif [[ "$world_bit" =~ [145] ]]; then
-            # 5 = r-x, 4 = r--, 1 = --x: all world-readable variants
+        elif [[ "$world_bit" =~ [45] ]]; then
+            # world-readable: 4 = r--, 5 = r-x. A bare 1 (--x) is traversal-only,
+            # not readable, so a hardened 711/751 home is intentionally NOT
+            # flagged (the old [145] class produced false "world-readable" WARNs).
             issues+=("$homedir ($username) world-readable: $perms")
         fi
     done < /etc/passwd
@@ -3417,11 +3714,15 @@ check_nfs_exports() {
             issues+=("no_root_squash: ${line:0:80}")
         fi
 
-        # Wildcard host spec: check each space-separated token after the path
-        # token is * alone or *(options) — allows any host to mount
-        local has_wildcard=false
-        local token
-        for token in $line; do
+        # Wildcard host spec: check each whitespace-separated token after the
+        # path. Use `read -ra` (NOT `for token in $line`) so a bare `*` in an
+        # export such as "/srv *(rw)" is NOT pathname-expanded against the
+        # current directory - that would replace the `*` with local filenames
+        # and hide the wildcard, producing a false-negative security result.
+        local has_wildcard=false token
+        local -a tokens=()
+        read -ra tokens <<< "$line"
+        for token in "${tokens[@]}"; do
             if [[ "$token" == "*" ]] || [[ "$token" == \*\(* ]]; then
                 has_wildcard=true
                 break
@@ -3516,9 +3817,12 @@ check_exposed_services() {
 
     for port in "${!local_only_services[@]}"; do
         local svc_name="${local_only_services[$port]}"
-        # Check if this port is listening on a non-loopback address
-        if echo "$listen_output" | grep -qE "0\.0\.0\.0:${port}[[:space:]]|:::${port}[[:space:]]|\*:${port}[[:space:]]"; then
-            # Verify it is actually listening (not just in ss output as a state)
+        # Match a wildcard/all-interfaces bind on this port. We enumerate every
+        # rendering: 0.0.0.0:P and *:P (IPv4), [::]:P (ss IPv6 wildcard) and
+        # :::P (netstat IPv6 wildcard). The trailing boundary prevents a port
+        # like 2379 from matching inside 23799.
+        if printf '%s\n' "$listen_output" | \
+           grep -qE "(0\.0\.0\.0:${port}|\*:${port}|\[::\]:${port}|:::${port})([[:space:]]|\$)"; then
             issues+=("$svc_name (port $port) exposed on all interfaces — should be 127.0.0.1 only")
         fi
     done
@@ -3562,8 +3866,14 @@ print_summary() {
     output "${GREEN}PASS:${NC} $PASS_COUNT"
     output "${YELLOW}WARN:${NC} $WARN_COUNT"
     output "${RED}FAIL:${NC} $FAIL_COUNT"
+    if [[ $CRITICAL_FAIL_COUNT -gt 0 ]]; then
+        output "${RED}${BOLD}  of which CRITICAL:${NC} $CRITICAL_FAIL_COUNT"
+    fi
     output ""
     output "Total checks: $total"
+
+    local duration
+    duration=$(get_run_duration)
 
     if [[ $total -gt 0 ]]; then
         local score=$((PASS_COUNT * 100 / total))
@@ -3581,6 +3891,8 @@ print_summary() {
         fi
     fi
 
+    output "${GRAY}Completed in ${duration}${NC}"
+
     # Write to report
     {
         echo ""
@@ -3590,8 +3902,10 @@ print_summary() {
         echo "PASS: $PASS_COUNT"
         echo "WARN: $WARN_COUNT"
         echo "FAIL: $FAIL_COUNT"
+        echo "CRITICAL FAIL: $CRITICAL_FAIL_COUNT"
         echo "Total: $total"
         [[ $total -gt 0 ]] && echo "Security Score: $((PASS_COUNT * 100 / total))%"
+        echo "Duration: $duration"
     } >> "$REPORT_FILE"
 }
 
@@ -3758,10 +4072,23 @@ print_quickstart_guide() {
 # =============================================================================
 
 main() {
+    # Install cleanup trap now that a real run is starting (kept out of the
+    # top level so the script stays safe to source for unit tests).
+    trap cleanup EXIT INT TERM
+
+    # Record the invocation for the report header (traceability/reproducibility).
+    INVOCATION_ARGS="$*"
+
     # Check bash version first
     check_bash_version
 
-    # Parse command line arguments first (before root check for --help)
+    # Load configuration file(s) as DEFAULTS before parsing CLI arguments.
+    # Precedence (lowest to highest): built-in defaults < config file < CLI flags.
+    # Loading first guarantees command-line flags always override config values.
+    load_config
+
+    # Parse command line arguments (override config-file defaults; handles
+    # --help/--version early exits before the root check).
     parse_args "$@"
 
     # Initialize colors (after parsing args to respect --quiet)
@@ -3825,9 +4152,6 @@ main() {
     # Check root privileges (Issue #9)
     check_root
 
-    # Load configuration
-    load_config
-
     # Detect OS (Issue #64)
     detect_os
 
@@ -3848,16 +4172,23 @@ main() {
     output "${GRAY}Starting audit at $(date)${NC}"
     output ""
 
-    # Write header to report
+    # Write header to report, including run metadata so a saved report is
+    # self-describing and reproducible (traceability).
     {
         echo "VPS Security Audit Tool v${VERSION}"
         echo "https://github.com/tomtom215/vps-audit"
         echo "Starting audit at $(date)"
         echo "================================"
         echo ""
-        echo "System: ${OS_INFO[name]}"
-        echo "Kernel: $(uname -r)"
-        echo "Hostname: $(hostname)"
+        echo "System:          ${OS_INFO[name]}"
+        echo "Kernel:          $(uname -r)"
+        echo "Hostname:        $(hostname)"
+        echo "Package manager: ${OS_INFO[pkg_manager]}"
+        echo "Service manager: ${OS_INFO[service_manager]}"
+        echo "Coreutils:       ${TOOL_INFO[coreutils]:-unknown}"
+        echo "Invocation:      $0 ${INVOCATION_ARGS}"
+        echo "Checks selected: ${CONFIG[checks]}"
+        echo "Output format:   ${CONFIG[output_format]}"
         echo ""
     } >> "$REPORT_FILE"
 
@@ -3867,15 +4198,24 @@ main() {
     local hostname kernel_version uptime_info uptime_since public_ip
     local cpu_info cpu_cores total_mem total_disk load_avg
 
-    hostname=$(hostname -f 2>/dev/null || hostname)
+    # `hostname -f` performs FQDN/reverse-DNS resolution and can BLOCK for the
+    # resolver timeout on a VPS with broken DNS (the `|| hostname` fallback only
+    # fires on non-zero exit, not on a hang). Bound it with `timeout` when
+    # available, and always fall back to the plain (non-resolving) hostname.
+    if has_command timeout; then
+        hostname=$(timeout 2 hostname -f 2>/dev/null || hostname 2>/dev/null)
+    else
+        hostname=$(hostname 2>/dev/null)
+    fi
+    [[ -z "$hostname" ]] && hostname="unknown"
     kernel_version=$(uname -r)
     uptime_info=$(get_uptime)
     uptime_since=$(get_uptime_since)
     public_ip=$(get_public_ip)
     cpu_info=$(lscpu 2>/dev/null | grep "Model name" | cut -d':' -f2 | xargs || echo "Unknown")
-    cpu_cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "Unknown")
+    cpu_cores=$(get_cpu_cores || echo "Unknown")
     total_mem=$(get_memory_stats "total_human")
-    total_disk=$(df -h / 2>/dev/null | awk 'NR==2 {print $2}' || echo "Unknown")
+    total_disk=$(df -hP / 2>/dev/null | awk 'NR==2 {print $2}' || echo "Unknown")
     load_avg=$(uptime | awk -F'load average:' '{print $2}' | xargs 2>/dev/null || echo "Unknown")
 
     print_info "Hostname" "$hostname"
@@ -3997,5 +4337,9 @@ main() {
     fi
 }
 
-# Run main function with all arguments
-main "$@"
+# Run main() only when executed directly. When sourced (e.g. by the unit-test
+# harness) the functions above are defined but no audit runs, enabling isolated
+# testing of individual functions.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

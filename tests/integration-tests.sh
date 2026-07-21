@@ -516,7 +516,7 @@ test_phase9_functions_in_main() {
 test_version_updated() {
     local output
     output=$("$VPS_AUDIT_SCRIPT" --version 2>&1)
-    assert_contains "$output" "2.3.0" "Version should be 2.3.0"
+    assert_contains "$output" "2.4.0" "Version should be 2.4.0"
 }
 
 # shellcheck disable=SC2317  # Called indirectly via run_test
@@ -619,6 +619,158 @@ test_network_sysctl_check_present() {
 }
 
 # =============================================================================
+# SOURCED FUNCTION UNIT TESTS
+#
+# The audit script guards `main` behind a BASH_SOURCE check, so it can be
+# sourced to test its pure helper functions directly - actually exercising
+# behaviour rather than grepping the source for strings. Each test sources the
+# script in a SUBSHELL (fresh readonly state, no global pollution) and asserts
+# on real return values.
+# =============================================================================
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_unit_source_does_not_run_audit() {
+    # Sourcing must define functions WITHOUT running an audit.
+    local out
+    # shellcheck source=/dev/null
+    out=$(source "$VPS_AUDIT_SCRIPT" 2>&1)
+    assert_not_contains "$out" "Audit Summary" "sourcing must not run the audit" || return 1
+    assert_not_contains "$out" "[PASS]" "sourcing must not execute checks" || return 1
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_unit_sanitize_int() {
+    (
+        # shellcheck source=/dev/null
+        source "$VPS_AUDIT_SCRIPT"
+        assert_equals "0"  "$(sanitize_int '')"        "empty -> 0"                    || exit 1
+        assert_equals "0"  "$(sanitize_int '0')"       "0 -> 0"                        || exit 1
+        assert_equals "5"  "$(sanitize_int '5')"       "5 -> 5"                        || exit 1
+        assert_equals "12" "$(sanitize_int '  12  ')"  "surrounding spaces stripped"   || exit 1
+        assert_equals "8"  "$(sanitize_int '08')"      "08 read base-10 (not octal)"   || exit 1
+        assert_equals "0"  "$(sanitize_int 'abc')"     "non-numeric -> 0"              || exit 1
+        # The historical "0\n0" double-zero footgun must normalise to 0.
+        assert_equals "0"  "$(sanitize_int "$(printf '0\n0')")" "0-newline-0 -> 0"     || exit 1
+    )
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_unit_count_lines() {
+    (
+        # shellcheck source=/dev/null
+        source "$VPS_AUDIT_SCRIPT"
+        assert_equals "0" "$(printf ''        | count_lines)" "empty input -> 0"        || exit 1
+        assert_equals "3" "$(printf 'a\nb\nc\n' | count_lines)" "3 lines -> 3"          || exit 1
+        assert_equals "1" "$(printf 'x'       | count_lines)" "no trailing newline -> 1" || exit 1
+        # grep with no match yields nothing -> 0 (the bug the helper fixes).
+        assert_equals "0" "$(printf 'a\nb\n' | grep 'zzz' | count_lines)" "no-match -> 0" || exit 1
+    )
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_unit_classify_bind_scope() {
+    (
+        # shellcheck source=/dev/null
+        source "$VPS_AUDIT_SCRIPT"
+        # Wildcard / all-interfaces binds are public.
+        assert_equals "public" "$(classify_bind_scope 0.0.0.0)"     "0.0.0.0 is public"      || exit 1
+        assert_equals "public" "$(classify_bind_scope '*')"         "* is public"            || exit 1
+        assert_equals "public" "$(classify_bind_scope '::')"        ":: is public"           || exit 1
+        # Loopback (incl. systemd-resolved 127.0.0.53) is local.
+        assert_equals "local"  "$(classify_bind_scope 127.0.0.1)"   "127.0.0.1 is local"     || exit 1
+        assert_equals "local"  "$(classify_bind_scope 127.0.0.53)"  "127.0.0.53 is local"    || exit 1
+        assert_equals "local"  "$(classify_bind_scope ::1)"         "::1 is local"           || exit 1
+        # RFC1918 / link-local / ULA are local.
+        assert_equals "local"  "$(classify_bind_scope 10.0.0.5)"    "10/8 is local"          || exit 1
+        assert_equals "local"  "$(classify_bind_scope 192.168.1.1)" "192.168/16 is local"    || exit 1
+        assert_equals "local"  "$(classify_bind_scope 172.16.0.1)"  "172.16/12 is local"     || exit 1
+        assert_equals "local"  "$(classify_bind_scope 169.254.0.1)" "link-local is local"    || exit 1
+        assert_equals "local"  "$(classify_bind_scope fe80::1)"     "fe80:: is local"        || exit 1
+        assert_equals "local"  "$(classify_bind_scope fd00::1)"     "fd00:: (ULA) is local"  || exit 1
+        # Public addresses (incl. 172.15 just outside RFC1918) are public.
+        assert_equals "public" "$(classify_bind_scope 172.15.0.1)"  "172.15 is public"       || exit 1
+        assert_equals "public" "$(classify_bind_scope 8.8.8.8)"     "8.8.8.8 is public"      || exit 1
+        assert_equals "public" "$(classify_bind_scope 2001:db8::1)" "global IPv6 is public"  || exit 1
+    )
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_unit_json_escape() {
+    (
+        # shellcheck source=/dev/null
+        source "$VPS_AUDIT_SCRIPT"
+        assert_equals '\"'   "$(json_escape '"')"                "double quote escaped"   || exit 1
+        assert_equals '\\'   "$(json_escape '\')"                "backslash escaped"      || exit 1
+        assert_equals 'a\tb' "$(json_escape "$(printf 'a\tb')")" "tab escaped"            || exit 1
+        assert_equals 'x\\\"y' "$(json_escape 'x\"y')"           "backslash before quote" || exit 1
+    )
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_unit_bytes_to_human() {
+    (
+        # shellcheck source=/dev/null
+        source "$VPS_AUDIT_SCRIPT"
+        assert_equals "0B"   "$(bytes_to_human 0)"          "0 bytes"        || exit 1
+        assert_equals "512B" "$(bytes_to_human 512)"        "sub-KiB bytes"  || exit 1
+        assert_equals "1.0K" "$(bytes_to_human 1024)"       "1 KiB"          || exit 1
+        assert_equals "1.0M" "$(bytes_to_human 1048576)"    "1 MiB"          || exit 1
+        assert_equals "2.0G" "$(bytes_to_human 2147483648)" "2 GiB"          || exit 1
+        assert_equals "?"    "$(bytes_to_human abc)"        "non-numeric -> ?" || exit 1
+    )
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_unit_is_numeric_is_integer() {
+    (
+        # shellcheck source=/dev/null
+        source "$VPS_AUDIT_SCRIPT"
+        is_numeric "0"    || exit 1
+        is_numeric "999"  || exit 1
+        is_numeric "-1"   && exit 1   # negative is NOT is_numeric
+        is_numeric "1.5"  && exit 1
+        is_numeric ""     && exit 1
+        is_integer "-1"   || exit 1   # negative IS is_integer
+        is_integer "42"   || exit 1
+        is_integer "1.5"  && exit 1
+        exit 0
+    )
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_unit_portable_stat() {
+    (
+        # shellcheck source=/dev/null
+        source "$VPS_AUDIT_SCRIPT"
+        detect_tool_versions   # populate TOOL_INFO[stat_type]
+        local tmp
+        tmp=$(mktemp) || exit 1
+        chmod 640 "$tmp"
+        local mode uid mt
+        mode=$(portable_stat mode "$tmp")
+        uid=$(portable_stat uid "$tmp")
+        mt=$(portable_stat mtime "$tmp")
+        rm -f "$tmp"
+        assert_equals "640" "$mode" "portable_stat mode reads 640" || exit 1
+        [[ "$uid" =~ ^[0-9]+$ ]] || { echo "uid not numeric: $uid"; exit 1; }
+        [[ "$mt"  =~ ^[0-9]+$ ]] || { echo "mtime not numeric: $mt"; exit 1; }
+    )
+}
+
+# shellcheck disable=SC2317  # Called indirectly via run_test
+test_unit_get_ssh_config_default() {
+    (
+        # shellcheck source=/dev/null
+        source "$VPS_AUDIT_SCRIPT"
+        # When sshd -T is unavailable and no config sets the key, the supplied
+        # default must be returned verbatim.
+        local v
+        v=$(get_ssh_config "ThisSettingDoesNotExist12345" "my-default")
+        assert_equals "my-default" "$v" "unknown SSH setting returns the default" || exit 1
+    )
+}
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -657,6 +809,19 @@ main() {
     run_test "portable_stat function" test_portable_stat_syntax
     run_test "has_command function" test_has_command_syntax
     run_test "TOOL_INFO array" test_tool_info_array
+
+    # Sourced function unit tests (exercise real behaviour, not string presence)
+    echo ""
+    echo "── Sourced Function Unit Tests ──"
+    run_test "sourcing does not run the audit"  test_unit_source_does_not_run_audit
+    run_test "is_numeric / is_integer behaviour" test_unit_is_numeric_is_integer
+    run_test "sanitize_int (incl. base-10 + 0\\n0)" test_unit_sanitize_int
+    run_test "count_lines helper"                test_unit_count_lines
+    run_test "classify_bind_scope (ports/IPv6)"  test_unit_classify_bind_scope
+    run_test "json_escape correctness"           test_unit_json_escape
+    run_test "bytes_to_human formatting"         test_unit_bytes_to_human
+    run_test "portable_stat (mode/uid/mtime)"    test_unit_portable_stat
+    run_test "get_ssh_config default fallback"   test_unit_get_ssh_config_default
 
     # Output format tests
     echo ""

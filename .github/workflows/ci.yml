@@ -67,23 +67,22 @@ jobs:
             SC_EXIT=$?
             set -e
 
-            if [ -z "$SC_OUTPUT" ]; then
+            # Use ShellCheck's exit status as the source of truth: it is
+            # non-zero if and only if there is at least one finding at the
+            # -S severity. (The display counts below match the gcc format
+            # "file:line:col: warning: ..." - note the space before the
+            # severity, which the previous ":warning:" pattern never matched,
+            # silently disabling this gate.)
+            if [ "$SC_EXIT" -eq 0 ]; then
               echo "[PASS] No issues found" >> $GITHUB_STEP_SUMMARY
             else
-              # Count issues
-              WARNINGS=$(echo "$SC_OUTPUT" | grep -c ":warning:" || true)
-              ERRORS=$(echo "$SC_OUTPUT" | grep -c ":error:" || true)
+              WARNINGS=$(echo "$SC_OUTPUT" | grep -cE ": warning:" || true)
+              ERRORS=$(echo "$SC_OUTPUT" | grep -cE ": error:" || true)
               TOTAL_WARNINGS=$((TOTAL_WARNINGS + WARNINGS))
               TOTAL_ERRORS=$((TOTAL_ERRORS + ERRORS))
+              SHELLCHECK_FAILED=1
 
-              if [ "$ERRORS" -gt 0 ]; then
-                echo "[FAIL] Found $ERRORS error(s) and $WARNINGS warning(s)" >> $GITHUB_STEP_SUMMARY
-                SHELLCHECK_FAILED=1
-              elif [ "$WARNINGS" -gt 0 ]; then
-                echo "[WARN] Found $WARNINGS warning(s)" >> $GITHUB_STEP_SUMMARY
-                SHELLCHECK_FAILED=1
-              fi
-
+              echo "[FAIL] Found $ERRORS error(s) and $WARNINGS warning(s)" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "<details>" >> $GITHUB_STEP_SUMMARY
               echo "<summary>View issues</summary>" >> $GITHUB_STEP_SUMMARY
