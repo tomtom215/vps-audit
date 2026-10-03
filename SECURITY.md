@@ -37,8 +37,8 @@ Only the latest release receives fixes.
 
 ## Verifying a download
 
-Release assets are published with a `SHA256SUMS` file and a build-provenance
-attestation:
+Releases are published by `.github/workflows/release.yml` with a `SHA256SUMS`
+file and a build-provenance attestation:
 
 ```bash
 sha256sum -c SHA256SUMS
