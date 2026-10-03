@@ -353,6 +353,16 @@ notice() {
     done < <(wrap_text "$TERM_COLS" $((${#tag} + 1)) "$tag $(printable "$3")")
 }
 
+# Print TEXT word-wrapped to the terminal in COLOR, with INDENT spaces on the
+# continuation lines. Honours --quiet. Usage: output_wrapped COLOR INDENT TEXT
+output_wrapped() {
+    local color="$1" indent="$2" line
+    [[ "${CONFIG[quiet]}" == "true" ]] && return 0
+    while IFS= read -r line; do
+        printf '%s\n' "${color}${line}${NC}"
+    done < <(wrap_text "$TERM_COLS" "$indent" "$(printable "$3")")
+}
+
 log_debug() {
     if [[ "${CONFIG[verbosity]}" == "verbose" ]]; then
         printf '%s\n' "${GRAY}[DEBUG] $(printable "$*")${NC}" >&2
@@ -958,6 +968,19 @@ count_security_packages() {
     awk '/^[A-Za-z]/ && NF >= 3 {print $3}' | sed -E 's/-[^-]+-[^-]+$//' | sort -u | grep -c .
 }
 
+# The command that installs pending updates with the detected package manager.
+upgrade_command() {
+    case "${OS_INFO[pkg_manager]}" in
+        apt) echo "apt upgrade" ;;
+        dnf) echo "dnf upgrade" ;;
+        yum) echo "yum update" ;;
+        zypper) echo "zypper update" ;;
+        pacman) echo "pacman -Syu" ;;
+        apk) echo "apk upgrade" ;;
+        *) echo "your package manager's upgrade command" ;;
+    esac
+}
+
 # Print the number of available SECURITY updates. Returns 1 (printing nothing)
 # when it cannot be determined for the current package manager.
 get_security_update_count() {
@@ -1487,7 +1510,8 @@ Options:
     -V, --verbose           Enable verbose/debug output
     --no-color              Disable colored output (also: NO_COLOR=1)
     --guide                 Show a quick-start hardening guide for a new VPS
-    --no-network            Do not contact the internet (skips public IP lookup)
+    --no-network            Do not contact other machines (no public IP lookup,
+                            no package-index refresh, no hostname DNS lookup)
     --no-suid               Skip the SUID/SGID file scan (can be slow)
     --checks LIST           Comma-separated list of check categories to run
     --dry-run               Show which checks would run without running them
@@ -1510,10 +1534,10 @@ EOF
 
 Examples:
     sudo $0                         # Run all checks
-    sudo $0 --guide                 # Show hardening guide for a new VPS
-    sudo $0 -q -f json              # Quiet mode, JSON report (for cron jobs)
-    sudo $0 --no-suid --no-network  # Skip slow / network checks
-    sudo $0 --checks ssh,firewall   # Run only specific categories
+    sudo $0 --guide                 # Hardening guide for a new VPS
+    sudo $0 -q -f json              # Quiet, JSON report (for cron)
+    sudo $0 --no-suid --no-network  # Skip slow and network parts
+    sudo $0 --checks ssh,firewall   # Only these categories
 
 Exit Codes:
     0   No check failed (warnings are allowed)
@@ -2310,10 +2334,10 @@ check_system_updates() {
         fi
     elif is_numeric "$security_updates" && [[ $security_updates -gt 0 ]]; then
         check_security "System Updates" "FAIL" "$security_updates security $(plural "$security_updates" update updates) available (${total_updates} total)${index_note}" \
-            "Install updates now (apt upgrade / dnf upgrade) and reboot if a kernel or libc was updated"
+            "Install them now with '$(upgrade_command)' and reboot if a kernel or libc was updated"
     else
         check_security "System Updates" "WARN" "$total_updates $(plural "$total_updates" update updates) available${index_note}" \
-            "Install updates soon"
+            "Install them soon with '$(upgrade_command)'"
     fi
 }
 
@@ -2364,7 +2388,7 @@ check_failed_logins() {
 
     if [[ -z "$log_source" ]]; then
         check_security "Failed Logins" "WARN" "Unable to read authentication logs" \
-            "Run as root, or check log/journal access permissions"
+            "No readable journal, /var/log/auth.log, /var/log/secure or /var/log/messages: install rsyslog or enable persistent journald storage so login attempts are recorded"
         return
     fi
 
@@ -4686,8 +4710,19 @@ print_summary() {
         elif [[ $score -lt 90 || $FAIL_COUNT -gt 0 ]]; then
             color="$YELLOW"
         fi
-        output "Security Score: ${BOLD}${score}%${NC} ${GRAY}(share of scored checks that passed)${NC}"
-        output "${color}Assessment: ${assessment}${NC}"
+        local score_text="Security Score: ${score}% (share of scored checks that passed)"
+        local -a score_lines=() score_line
+        mapfile -t score_lines < <(wrap_text "$TERM_COLS" 2 "$score_text")
+        local score_head="Security Score: ${score}%"
+        if [[ "${score_lines[0]}" == "$score_head"* ]]; then
+            output "Security Score: ${BOLD}${score}%${NC}${GRAY}${score_lines[0]:${#score_head}}${NC}"
+        else
+            output "${score_lines[0]}"
+        fi
+        for score_line in "${score_lines[@]:1}"; do
+            output "${GRAY}${score_line}${NC}"
+        done
+        output_wrapped "$color" 2 "Assessment: ${assessment}"
     fi
     output "${GRAY}Completed in ${duration}${NC}"
 
@@ -4725,7 +4760,7 @@ print_recommendations() {
     output "${BOLD}Recommended Actions (priority order)${NC}"
     output "$REPORT_RULE"
     output ""
-    output "${GRAY}Fix these in order, critical items first:${NC}"
+    output_wrapped "$GRAY" 0 "Fix these in order, critical items first:"
     {
         echo ""
         echo "$REPORT_RULE"
@@ -4759,51 +4794,83 @@ print_recommendations() {
 
 # Print quick-start hardening guide for new VPS
 print_quickstart_guide() {
+    # A document, not a report line: wrap it even when piped (76 columns) and
+    # keep it readable on a very wide terminal (at most 100). `local` makes
+    # the width visible to output_wrapped for this call only.
+    local TERM_COLS="$TERM_COLS"
+    if [[ $TERM_COLS -le 0 ]]; then
+        TERM_COLS=76
+    elif [[ $TERM_COLS -gt 100 ]]; then
+        TERM_COLS=100
+    fi
     output ""
     output "$REPORT_RULE"
     output "${BOLD}Quick-Start Hardening Guide${NC}"
     output "$REPORT_RULE"
     output ""
-    output "For a NEW VPS, complete these steps in order. Commands are for"
-    output "Debian/Ubuntu; on RHEL-family systems use dnf, firewalld and the"
-    output "'wheel' group instead."
+    output_wrapped "" 0 "For a NEW VPS, complete these steps in order. Commands are for Debian/Ubuntu; on RHEL-family systems use dnf, firewalld and the 'wheel' group instead."
     output ""
-    output "${YELLOW}${BOLD}Keep your current SSH session open${NC} while you change SSH or firewall"
-    output "settings, and confirm a second login works before closing it."
+    output_wrapped "${YELLOW}${BOLD}" 0 "Keep your current SSH session open while you change SSH or firewall settings, and confirm a second login works before closing it."
     output ""
-    output "${BOLD}1. Create a non-root user with sudo access:${NC}"
+    output_wrapped "$BOLD" 3 "1. Create a non-root user with sudo access:"
     output "   adduser yourusername"
     output "   usermod -aG sudo yourusername"
     output ""
-    output "${BOLD}2. Set up SSH key authentication (from your own computer):${NC}"
+    output_wrapped "$BOLD" 3 "2. Set up SSH key authentication (from your own computer):"
     output "   ssh-copy-id yourusername@your-server-ip"
     output ""
-    output "${BOLD}3. Disable root login and password auth:${NC}"
+    output_wrapped "$BOLD" 3 "3. Disable root login and password auth:"
     output "   Create /etc/ssh/sshd_config.d/10-hardening.conf containing:"
     output "     PermitRootLogin no"
     output "     PasswordAuthentication no"
     output "   sshd -t && systemctl reload ssh"
     output ""
-    output "${BOLD}4. Enable a firewall (allow only SSH):${NC}"
+    output_wrapped "$BOLD" 3 "4. Enable a firewall (allow only SSH):"
     output "   ufw default deny incoming"
     output "   ufw default allow outgoing"
     output "   ufw allow ssh        # or: ufw allow <your-ssh-port>/tcp"
     output "   ufw enable"
     output ""
-    output "${BOLD}5. Install and enable fail2ban:${NC}"
+    output_wrapped "$BOLD" 3 "5. Install and enable fail2ban:"
     output "   apt install fail2ban"
     output "   systemctl enable --now fail2ban"
     output ""
-    output "${BOLD}6. Enable automatic security updates:${NC}"
+    output_wrapped "$BOLD" 3 "6. Enable automatic security updates:"
     output "   apt install unattended-upgrades"
     output "   dpkg-reconfigure -plow unattended-upgrades"
     output ""
-    output "${GRAY}Run this script again after completing these steps.${NC}"
+    output_wrapped "$GRAY" 0 "Run this script again after completing these steps."
 }
 
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
+
+# Where the report is, and what to do next. The path is kept in one piece so it
+# can be copied: on a narrow terminal it moves to its own line.
+print_closing_message() {
+    output ""
+    local saved="Audit complete. Report saved to: "
+    if [[ $TERM_COLS -gt 0 && $((${#saved} + ${#REPORT_FILE})) -gt $TERM_COLS ]]; then
+        output "Audit complete. Report saved to:"
+        output "  ${BOLD}${REPORT_FILE}${NC}"
+    else
+        output "${saved}${BOLD}${REPORT_FILE}${NC}"
+    fi
+
+    # Provide helpful hints for new users
+    if [[ $CRITICAL_FAIL_COUNT -gt 0 ]]; then
+        output ""
+        output "${RED}${BOLD}CRITICAL SECURITY ISSUES FOUND!${NC}"
+        output_wrapped "" 0 "Your server has serious security vulnerabilities that need immediate attention."
+        output ""
+        output_wrapped "" 0 "For step-by-step hardening guidance, run:"
+        output "  ${BOLD}sudo $0 --guide${NC}"
+    elif [[ $FAIL_COUNT -gt 0 ]]; then
+        output ""
+        output_wrapped "$YELLOW" 0 "Security issues were found. Review the recommendations above."
+    fi
+}
 
 main() {
     # Install cleanup trap now that a real run is starting (kept out of the
@@ -5015,21 +5082,7 @@ main() {
         echo "================================"
     } >>"$REPORT_FILE"
 
-    output ""
-    output "Audit complete. Report saved to: ${BOLD}${REPORT_FILE}${NC}"
-
-    # Provide helpful hints for new users
-    if [[ $CRITICAL_FAIL_COUNT -gt 0 ]]; then
-        output ""
-        output "${RED}${BOLD}CRITICAL SECURITY ISSUES FOUND!${NC}"
-        output "Your server has serious security vulnerabilities that need immediate attention."
-        output ""
-        output "For step-by-step hardening guidance, run:"
-        output "  ${BOLD}sudo $0 --guide${NC}"
-    elif [[ $FAIL_COUNT -gt 0 ]]; then
-        output ""
-        output "${YELLOW}Security issues were found. Review the recommendations above.${NC}"
-    fi
+    print_closing_message
 
     # Exit with appropriate code
     if [[ $CRITICAL_FAIL_COUNT -gt 0 ]]; then

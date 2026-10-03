@@ -144,7 +144,7 @@ test_readme_category_table_matches_script() {
     done
     # and nothing extra
     local rows
-    rows="$(sed -n '/^| Category | Description |/,/^$/p' "$readme" | grep -cE '^\| `?[a-z]+`? +\|')"
+    rows="$(sed -n '/^| Category | Covers |/,/^$/p' "$readme" | grep -cE '^\| `?[a-z]+`? +\|')"
     assert_eq "$(category_keys | wc -l | tr -d ' ')" "$rows" "README lists a different number of categories than the script" || return 1
 }
 
@@ -227,4 +227,38 @@ test_no_links_to_the_original_repository() {
     local hits
     hits="$(grep -rIn --exclude-dir=.git --exclude-dir=test-results 'github.com/vern[u]' "$TESTS_DIR/.." || true)"
     assert_eq "" "$hits" "links to the original repository" || return 1
+}
+
+# The help text is read in a terminal. Invoked as ./vps-audit.sh (how the
+# README shows it) no line may be wider than a classic 80-column terminal.
+test_help_fits_80_columns() {
+    local longest
+    longest="$(cd "$REPO_DIR" && ./vps-audit.sh --help | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')"
+    [[ $longest -le 80 ]] || fail "--help has a line of $longest columns" || return 1
+}
+
+# The README says which systems the matrix covers; it must list every image
+# tests/matrix.sh runs, and nothing else.
+test_readme_lists_every_matrix_image_and_nothing_else() {
+    local readme="$REPO_DIR/README.md" image listed
+    local -a images=()
+    while read -r image _; do
+        images+=("$image")
+        grep -qF "\`$image\`" "$readme" || fail "README does not list the matrix image $image" || return 1
+    done < <("$REPO_DIR/tests/matrix.sh" -l)
+    [[ ${#images[@]} -gt 0 ]] || fail "matrix.sh -l printed nothing" || return 1
+    # Every container image named in the Tested systems tables is in the matrix.
+    while read -r listed; do
+        [[ " ${images[*]} " == *" $listed "* ]] || fail "README names $listed, which is not in the matrix" || return 1
+    done < <(sed -n '/^### Tested systems/,/^## Usage/p' "$readme" | grep -oE '^\| [^|]+\| `[^`]+`' | grep -oE '`[^`]+`' | tr -d '`')
+}
+
+# A README image that does not exist shows as a broken icon on the project page.
+test_readme_images_exist() {
+    local readme="$REPO_DIR/README.md" path n=0
+    while read -r path; do
+        n=$((n + 1))
+        [[ -f "$REPO_DIR/$path" ]] || fail "README links $path, which does not exist" || return 1
+    done < <(grep -oE '\]\(docs/[^)]+\)' "$readme" | sed -E 's/^\]\(//; s/\)$//')
+    [[ $n -gt 0 ]] || fail "README links no images under docs/" || return 1
 }

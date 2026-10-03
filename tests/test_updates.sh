@@ -163,3 +163,19 @@ test_plural_picks_the_form_for_the_count() {
     assert_eq files "$(plural 0 file files)" || return 1
     assert_eq files "$(plural 2 file files)" || return 1
 }
+
+# The recommendation used to say only "Install updates soon", and for failed
+# logins "Run as root" although the audit already requires root.
+test_upgrade_command_matches_the_package_manager() {
+    local pm expected
+    for pm in "apt:apt upgrade" "dnf:dnf upgrade" "yum:yum update" "zypper:zypper update" "pacman:pacman -Syu" "apk:apk upgrade"; do
+        OS_INFO[pkg_manager]="${pm%%:*}"
+        expected="${pm#*:}"
+        assert_eq "$expected" "$(upgrade_command)" "${pm%%:*}" || return 1
+    done
+}
+
+test_system_updates_recommendation_names_the_command() {
+    apt_index_case 3 1 "Inst a [1] (2 Ubuntu:24.04/noble-updates)" || return 1
+    assert_contains "$RESULT_REC" "apt upgrade" || return 1
+}

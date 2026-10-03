@@ -289,3 +289,71 @@ test_prerequisite_notes_are_deferred_until_after_the_banner() {
     [[ ${#PREREQ_NOTES[@]} -gt 0 ]] || fail "expected a note about missing optional commands" || return 1
     assert_contains "${PREREQ_NOTES[0]}" "Missing optional commands" || return 1
 }
+
+# --- fixed lines wrap too ---------------------------------------------------------
+# Rendered at 40 columns, the score, assessment, "Fix these in order" and the
+# closing messages ran past the edge and left a stranded ":" on its own row.
+
+longest_line() { awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' <<<"$1"; }
+
+test_summary_and_recommendations_header_fit_a_40_column_terminal() {
+    local d
+    d="$(make_tmp)" || return 1
+    REPORT_FILE="$d/report.txt"
+    : >"$REPORT_FILE"
+    CONFIG[quiet]=false
+    CONFIG[output_format]=text
+    BOLD='' NC='' GRAY='' RED='' YELLOW='' GREEN='' BLUE=''
+    TERM_COLS=40
+    PASS_COUNT=10 WARN_COUNT=5 FAIL_COUNT=1 CRITICAL_FAIL_COUNT=1 INFO_COUNT=2
+    RECOMMENDATIONS=("1|[Firewall Status] Set a default-deny inbound policy")
+    local out
+    out="$(
+        print_summary 2>&1
+        print_recommendations 2>&1
+    )"
+    local n
+    n="$(longest_line "$out")"
+    [[ $n -le 40 ]] || fail "a line is $n columns wide on a 40-column terminal: $(awk 'length($0) > 40' <<<"$out" | head -1)" || return 1
+}
+
+test_closing_message_fits_a_40_column_terminal_and_keeps_the_path_whole() {
+    local d out path
+    d="$(make_tmp)" || return 1
+    path="$d/vps-audit-report-20261003-230346-ew5fJH.txt"
+    REPORT_FILE="$path"
+    CONFIG[quiet]=false
+    BOLD='' NC='' RED='' YELLOW=''
+    TERM_COLS=40
+    CRITICAL_FAIL_COUNT=1 FAIL_COUNT=1
+    out="$(print_closing_message)"
+    assert_contains "$out" "$path" "the path must stay in one piece so it can be copied" || return 1
+    out="$(grep -v -F "$path" <<<"$out")"
+    local n
+    n="$(longest_line "$out")"
+    [[ $n -le 40 ]] || fail "a line is $n columns wide: $(awk 'length($0) > 40' <<<"$out" | head -1)" || return 1
+}
+
+test_closing_message_on_one_line_when_the_terminal_is_wide_enough() {
+    REPORT_FILE=/tmp/r.txt
+    CONFIG[quiet]=false
+    BOLD='' NC='' RED='' YELLOW=''
+    TERM_COLS=100
+    CRITICAL_FAIL_COUNT=0 FAIL_COUNT=0
+    assert_eq "Audit complete. Report saved to: /tmp/r.txt" "$(print_closing_message | sed -n 2p)" || return 1
+}
+
+# The guide's prose and headings wrap to the terminal; the indented command
+# lines are left alone so they can be copied.
+test_guide_prose_fits_a_40_column_terminal() {
+    CONFIG[quiet]=false
+    BOLD='' NC='' GRAY='' RED='' YELLOW=''
+    REPORT_RULE="================================"
+    TERM_COLS=40
+    local out line
+    out="$(print_quickstart_guide)"
+    while IFS= read -r line; do
+        [[ "$line" == "   "* ]] && continue
+        [[ ${#line} -le 40 ]] || fail "guide line is ${#line} columns: [$line]" || return 1
+    done <<<"$out"
+}

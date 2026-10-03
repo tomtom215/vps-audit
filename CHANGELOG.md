@@ -31,7 +31,10 @@ changes that can affect scripts are listed under "Changed".**
 - **Input validation:** unknown `--checks` categories are rejected (previously a
   typo silently ran an empty audit that reported all-clear); percentage
   thresholds must be 1-100.
-- **Output:** word-wrapped lines with hanging indents on a terminal; ASCII only.
+- **Output:** word-wrapped lines with hanging indents on a terminal, including
+  notes, warnings, the system-information rows, the score and assessment, the
+  closing messages and the `--guide` text (the guide also wraps at 76 columns
+  when piped); the report path is kept in one piece; ASCII only.
 - **Tests:** a behavioural suite (`tests/run.sh`) driven by stubbed commands and
   real captured fixtures; a distro and Bash-version matrix (`tests/matrix.sh`)
   that runs the suite, real-state scenarios (nftables rules, mounted
@@ -130,6 +133,11 @@ changes that can affect scripts are listed under "Changed".**
   unmodified Ubuntu, RHEL-family, Amazon Linux and Arch images
   (`pam_extrausers_chkpwd`, `utempter`, `ssh-keysign`, `unix_chkpwd`).
 - Messages use the singular where it applies ("1 security update available").
+- Two recommendations said nothing useful: pending updates now name the
+  package manager's upgrade command, and unreadable authentication logs
+  explain what was looked for (it said "Run as root" to a script that already
+  requires root).
+- `--help` fits 80 columns, and `--no-network` is described as what it does.
 - **Test harness:** `stub_bin` wrote through a link to a real utility and
   replaced `/usr/bin/hostname` when the suite ran as root. Fixed, with a test.
 - **Failed-login counting** ignored `Invalid user` and pre-auth closes, the only
