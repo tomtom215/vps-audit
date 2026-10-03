@@ -199,7 +199,8 @@ run_one() {
     [[ -n "${EXTRA_CA_BUNDLE:-}" ]] && ca_args=(-v "$EXTRA_CA_BUNDLE:/extra-ca.crt:ro")
 
     # shellcheck disable=SC2086  # DOCKER_RUN_ARGS is deliberately word-split
-    docker run --rm --privileged -e "MATRIX_KIND=$kind" ${DOCKER_RUN_ARGS:-} "${ca_args[@]}" \
+    docker run --rm --privileged -e "MATRIX_KIND=$kind" -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
+        ${DOCKER_RUN_ARGS:-} "${ca_args[@]}" \
         -v "$REPO_DIR:/src:ro" -v "$dir:/out" --entrypoint sh "$image" -c '
             sh /src/tests/container/setup.sh >/out/setup.log 2>&1
             echo $? >/out/setup.exit

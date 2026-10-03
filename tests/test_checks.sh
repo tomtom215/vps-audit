@@ -25,7 +25,10 @@ test_kernel_hardening_stricter_values_pass() {
 # Regression: the recommendation printed the *current* insecure value
 # ("rp_filter=0"), which reads as the setting to apply.
 test_kernel_hardening_recommendation_states_wanted_value() {
-    sysctl_values "${KERNEL_OK[@]}" net.ipv4.conf.all.rp_filter=0
+    # all AND default are 0: with default=1 the effective value would be 1 and
+    # nothing is insecure (these tests used to pass only because the machine's
+    # real interfaces happened to read 0).
+    sysctl_values "${KERNEL_OK[@]}" net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0
     record_checks
     check_kernel_hardening
     assert_eq WARN "$RESULT_STATUS" || return 1
@@ -34,7 +37,7 @@ test_kernel_hardening_recommendation_states_wanted_value() {
 }
 
 test_kernel_hardening_lists_every_failing_setting() {
-    sysctl_values "${KERNEL_OK[@]}" net.ipv4.conf.all.rp_filter=0 kernel.dmesg_restrict=0
+    sysctl_values "${KERNEL_OK[@]}" net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 kernel.dmesg_restrict=0
     record_checks
     check_kernel_hardening
     assert_contains "$RESULT_REC" "rp_filter" || return 1

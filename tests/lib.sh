@@ -164,6 +164,9 @@ declare -A SYSCTL_FAKE=()
 # subshell, so it cannot shadow the real command for other tests.
 # Usage: sysctl_values "key=val" ...
 sysctl_values() {
+    # rp_filter is judged per interface from the real /proc/sys of the machine
+    # running the suite; detach that unless the test chose its own fixture.
+    [[ "$IPV4_CONF_DIR" == /proc/* ]] && IPV4_CONF_DIR="$(make_tmp)"
     SYSCTL_FAKE=()
     local kv
     for kv in "$@"; do

@@ -336,3 +336,21 @@ test_stub_bin_never_writes_through_a_symlinked_utility() {
     assert_eq real "$("$real")" "the symlink target must be left alone" || return 1
     assert_eq stub "$("$HIDE_DIR/fake-utility")" "the stub must take its place" || return 1
 }
+
+# check_kernel_hardening reads net.ipv4.conf.<interface>/rp_filter from the
+# real /proc/sys of whoever runs the suite. Two tests expected "rp_filter=0" to
+# be reported and failed on GitHub's runners (interfaces there have 2) while
+# passing everywhere else. Faking sysctl must therefore also detach that
+# directory, unless the test points it at its own fixture first.
+test_sysctl_values_does_not_leave_the_real_interface_directory_in_play() {
+    sysctl_values "${KERNEL_OK[@]}"
+    assert_not_contains "$IPV4_CONF_DIR" "/proc/" "the real /proc interface values would leak into the test" || return 1
+}
+
+test_sysctl_values_keeps_a_fixture_directory_the_test_chose() {
+    local d
+    d="$(make_tmp)" || return 1
+    IPV4_CONF_DIR="$d"
+    sysctl_values "${KERNEL_OK[@]}"
+    assert_eq "$d" "$IPV4_CONF_DIR" || return 1
+}

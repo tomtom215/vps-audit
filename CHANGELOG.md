@@ -7,8 +7,9 @@ version; the `VERSION` constant in the script is the single source of truth.
 
 ## [2.5.0] - 2026-10-03
 
-A correctness, accuracy and polish release. Each fix below has a regression
-test. **Behaviour changes that can affect scripts are listed under "Changed".**
+A correctness, accuracy and polish release. Each fix to the audit's behaviour
+below has a regression test. **Behaviour changes that can affect scripts are
+listed under "Changed".**
 
 ### Added
 - **`INFO` status.** Results that are worth knowing but are not failures on a
@@ -141,7 +142,14 @@ test. **Behaviour changes that can affect scripts are listed under "Changed".**
   requires root).
 - `--help` fits 80 columns, and `--no-network` is described as what it does.
 - **Test harness:** `stub_bin` wrote through a link to a real utility and
-  replaced `/usr/bin/hostname` when the suite ran as root. Fixed, with a test.
+  replaced `/usr/bin/hostname` when the suite ran as root. Two more problems
+  appeared only on GitHub's runners and not on the maintainer's machine: the
+  matrix could not read its own results when started by a non-root user (the
+  audit's reports are root-owned, mode 600, and now belong to the invoking
+  user afterwards), and two kernel-hardening tests depended on the network
+  interfaces of the machine running them. All fixed. The `stub_bin` and
+  interface fixes have tests; the matrix fix was checked by running one image
+  as an unprivileged user before and after.
 - **Failed-login counting** ignored `Invalid user` and pre-auth closes, the only
   lines written when password authentication is off.
 - Open ports: DHCP client sockets and `address%interface` forms are handled, the

@@ -38,3 +38,10 @@ fi
 
 "$SRC/vps-audit.sh" -f both -o "$OUT" --no-network >"$OUT/audit.stdout" 2>"$OUT/audit.stderr"
 echo $? >"$OUT/audit.exit"
+
+# The audit ran as root, so its reports are root-owned (mode 600 by design).
+# Hand everything to the user who started the matrix, keeping the modes, so
+# that user can read, validate and upload the results.
+if [ -n "${HOST_UID:-}" ]; then
+    chown -R "$HOST_UID:${HOST_GID:-$HOST_UID}" "$OUT"
+fi
