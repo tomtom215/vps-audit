@@ -150,3 +150,16 @@ test_system_updates_apt_failure_is_unknown_not_pass() {
     assert_eq WARN "$RESULT_STATUS" || return 1
     assert_contains "$RESULT_MSG" "Unable" || return 1
 }
+
+# Observed on Debian, Ubuntu and Alpine images: "1 security updates available".
+test_system_updates_message_uses_the_singular_for_one() {
+    apt_index_case 3 1 "Inst a [1] (2 Ubuntu:24.04/noble-security)" || return 1
+    assert_contains "$RESULT_MSG" "1 security update available" || return 1
+    assert_not_contains "$RESULT_MSG" "updates available (1 total)" || return 1
+}
+
+test_plural_picks_the_form_for_the_count() {
+    assert_eq file "$(plural 1 file files)" || return 1
+    assert_eq files "$(plural 0 file files)" || return 1
+    assert_eq files "$(plural 2 file files)" || return 1
+}

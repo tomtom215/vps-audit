@@ -301,3 +301,21 @@ test_network_allowed_by_default_does_not_force_cache_only() {
     get_update_count >/dev/null
     assert_not_contains "$(cat "$DNF_ARGS")" "-C" || return 1
 }
+
+# Observed on Rocky Linux 9: "62 security updates available (43 total)". dnf
+# lists one updateinfo row per advisory and package version, so a package that
+# several advisories touch was counted once per row. The fixture is real
+# `dnf updateinfo list --security --available` output (58 rows, 32 packages).
+test_update_count_dnf_security_counts_packages_not_advisory_rows() {
+    updates_case dnf
+    stub dnf "cat \"\$TESTS_DIR/fixtures/updates/dnf-updateinfo-security-rocky9.txt\""
+    assert_eq 32 "$(get_security_update_count)" "58 advisory rows, 32 distinct packages" || return 1
+}
+
+test_update_count_dnf_security_none_is_zero_and_success() {
+    updates_case dnf
+    stub dnf 'return 0'
+    local n
+    n="$(get_security_update_count)" || fail "zero security updates must not be an error"
+    assert_eq 0 "$n" || return 1
+}

@@ -119,7 +119,7 @@ test_cli_help_documents_every_category() {
     run_audit --help
     local key
     for key in $(category_keys); do
-        printf '%s\n' "$OUT" | grep -qE "^    $key +" || fail "--help must document category '$key'"
+        grep -qE "^    $key +" <<<"$OUT" || fail "--help must document category '$key'"
     done
 }
 
@@ -209,9 +209,22 @@ test_script_defines_every_function_once() {
 # Every check function must be called from main(), or it is dead code that
 # looks like coverage.
 test_every_check_function_is_called_from_main() {
-    local fn missing=""
+    # The body of main() is read once into a variable and matched with a
+    # here-string: `awk | grep -q` under pipefail fails whenever grep exits
+    # before awk has finished writing (it did, on 12 of 20 distro images).
+    local fn missing="" body
+    body="$(awk '/^main\(\) \{/ {m=1} m' "$AUDIT_SCRIPT")"
     for fn in $(grep -oE '^check_[a-z0-9_]+\(\)' "$AUDIT_SCRIPT" | tr -d '()' | grep -vx check_security); do
-        awk '/^main\(\) \{/ {m=1} m' "$AUDIT_SCRIPT" | grep -qE "^[[:space:]]+${fn}\$" || missing+="$fn "
+        grep -qE "^[[:space:]]+${fn}\$" <<<"$body" || missing+="$fn "
     done
     assert_eq "" "$missing" "check functions never called by main()" || return 1
+}
+
+# This project is not contributing to, or targeting, the repository it was
+# derived from; nothing should link to it. (LICENSE keeps the original
+# copyright notice, which the MIT license requires, and names no URL.)
+test_no_links_to_the_original_repository() {
+    local hits
+    hits="$(grep -rIn --exclude-dir=.git --exclude-dir=test-results 'github.com/vern[u]' "$TESTS_DIR/.." || true)"
+    assert_eq "" "$hits" "links to the original repository" || return 1
 }

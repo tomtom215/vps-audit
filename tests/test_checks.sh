@@ -208,6 +208,16 @@ test_suid_lookalike_path_is_not_exempt() {
     assert_contains "$RESULT_MSG" "/opt/evil/bin/su" || return 1
 }
 
+# Each of these was reported as "outside the standard set" on an unmodified
+# image in the distro matrix (Ubuntu 22.04/24.04/26.04, Alma/Rocky 9 and 10,
+# Amazon Linux 2023, Arch).
+test_sgid_helpers_shipped_by_the_distributions_pass() {
+    suid_case /usr/sbin/pam_extrausers_chkpwd /usr/libexec/utempter/utempter \
+        /usr/libexec/openssh/ssh-keysign /usr/bin/unix_chkpwd || return 1
+    scan_special_files SGID "${KNOWN_SAFE_SGID[@]}"
+    assert_eq PASS "$RESULT_STATUS" "$RESULT_MSG" || return 1
+}
+
 test_sgid_unexpected_file_is_named_too() {
     suid_case /usr/bin/wall /usr/local/bin/odd-sgid || return 1
     scan_special_files SGID "${KNOWN_SAFE_SGID[@]}"

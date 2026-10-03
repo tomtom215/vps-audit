@@ -2,8 +2,7 @@
 #
 # VPS Security Audit Tool
 #
-# Fork: https://github.com/tomtom215/vps-audit
-# Original: https://github.com/vernu/vps-audit
+# https://github.com/tomtom215/vps-audit
 #
 # A read-only security audit for Linux VPS servers: it inspects the system,
 # prints PASS/WARN/FAIL results with prioritised fixes, and writes a text
@@ -277,6 +276,11 @@ init_term_width() {
     TERM_COLS="$cols"
 }
 
+# Print SINGULAR when COUNT is 1, otherwise PLURAL. Usage: plural COUNT SINGULAR PLURAL
+plural() {
+    if [[ "$1" == 1 ]]; then printf '%s' "$2"; else printf '%s' "$3"; fi
+}
+
 # Replace control characters (ESC, BEL, CR, ...) with a space so text taken
 # from the audited system can never drive the terminal. Prints the result.
 printable() {
@@ -541,7 +545,7 @@ has_command() {
 detect_tool_versions() {
     # Detect stat variant (GNU vs BSD)
     if has_command stat; then
-        if stat --version 2>&1 | grep -q "GNU\|coreutils"; then
+        if stat --version 2>&1 | grep "GNU\|coreutils" >/dev/null; then
             TOOL_INFO[stat_type]="gnu"
         elif stat -f "%z" / &>/dev/null; then
             TOOL_INFO[stat_type]="bsd"
@@ -586,7 +590,7 @@ detect_tool_versions() {
 
     # Detect iptables backend (legacy vs nftables)
     if has_command iptables; then
-        if iptables --version 2>&1 | grep -q "nf_tables"; then
+        if iptables --version 2>&1 | grep "nf_tables" >/dev/null; then
             TOOL_INFO[iptables_nft]="true"
         else
             TOOL_INFO[iptables_nft]="false"
@@ -595,7 +599,8 @@ detect_tool_versions() {
 
     # Get ss version if available
     if has_command ss; then
-        TOOL_INFO[ss_version]=$(ss --version 2>&1 | head -1 || echo "unknown")
+        TOOL_INFO[ss_version]=$(ss --version 2>&1 | head -1)
+        [[ -n "${TOOL_INFO[ss_version]}" ]] || TOOL_INFO[ss_version]="unknown"
     fi
 
     log_debug "Tool detection: stat=${TOOL_INFO[stat_type]}, coreutils=${TOOL_INFO[coreutils]}, busybox=${TOOL_INFO[busybox]:-false}"
@@ -852,7 +857,7 @@ pkg_installed() {
 
     case "${OS_INFO[pkg_manager]}" in
         apt)
-            dpkg -l "$package" 2>/dev/null | grep -q "^ii"
+            dpkg -l "$package" 2>/dev/null | grep "^ii" >/dev/null
             ;;
         dnf | yum)
             rpm -q "$package" &>/dev/null
@@ -943,6 +948,16 @@ get_update_count() {
     return 0
 }
 
+# Count the distinct packages in `dnf/yum updateinfo list` output on stdin. One
+# row is printed per advisory and package version, so a package touched by
+# several advisories appears several times (a fresh Rocky Linux 9 image lists 58
+# rows for 32 packages). Rows are "ADVISORY SEVERITY NAME-[EPOCH:]VERSION-RELEASE.ARCH";
+# VERSION and RELEASE never contain a dash, so dropping the last two dash
+# fields leaves the package name.
+count_security_packages() {
+    awk '/^[A-Za-z]/ && NF >= 3 {print $3}' | sed -E 's/-[^-]+-[^-]+$//' | sort -u | grep -c .
+}
+
 # Print the number of available SECURITY updates. Returns 1 (printing nothing)
 # when it cannot be determined for the current package manager.
 get_security_update_count() {
@@ -961,14 +976,13 @@ get_security_update_count() {
             out=$(dnf -q "${PKG_OFFLINE_FLAGS[@]}" updateinfo list --security --available 2>/dev/null)
             rc=$?
             [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
-            # Count advisory rows only (lines beginning with a severity/advisory id).
-            printf '%s\n' "$out" | grep -c -E '^[A-Za-z]'
+            count_security_packages <<<"$out"
             ;;
         yum)
             out=$(yum -q "${PKG_OFFLINE_FLAGS[@]}" updateinfo list security 2>/dev/null)
             rc=$?
             [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
-            printf '%s\n' "$out" | grep -c -E '^[A-Za-z]'
+            count_security_packages <<<"$out"
             ;;
         *)
             # No reliable per-security query: fall back to the total update count.
@@ -996,7 +1010,7 @@ service_is_active() {
             service "$service" status &>/dev/null
             ;;
         runit)
-            sv status "$service" 2>/dev/null | grep -q "^run:"
+            sv status "$service" 2>/dev/null | grep "^run:" >/dev/null
             ;;
         *)
             log_debug "Unknown service manager, cannot check service: $service"
@@ -1766,9 +1780,10 @@ load_sshd_effective_config() {
     fi
     [[ -z "$sshd_bin" ]] && return 1
 
-    # `sshd -T` needs root and a parseable config. Try the plain form first;
-    # some configurations with Match blocks require a connection spec, so retry
-    # with a representative one before giving up.
+    # `sshd -T` needs root and a parseable config. Try the plain form first.
+    # Before OpenSSH 8.1 it refused to run when sshd_config had a Match block
+    # whose criteria it was not given, so retry with a representative
+    # connection spec (-C) before giving up.
     local out
     if out=$("$sshd_bin" -T 2>/dev/null) && [[ -n "$out" ]]; then
         SSHD_EFFECTIVE_CONFIG="$out"
@@ -2024,8 +2039,8 @@ nft_input_default_deny() {
 iptables_input_default_deny() {
     local rules
     rules=$("$1" -S INPUT 2>/dev/null) || return 1
-    printf '%s\n' "$rules" | grep -qE '^-P INPUT (DROP|REJECT)' && return 0
-    printf '%s\n' "$rules" | grep '^-A INPUT ' | tail -n 1 | grep -qE '^-A INPUT -j (DROP|REJECT)( |$)'
+    grep -qE '^-P INPUT (DROP|REJECT)' <<<"$rules" && return 0
+    grep '^-A INPUT ' <<<"$rules" | tail -n 1 | grep -qE '^-A INPUT -j (DROP|REJECT)( |$)'
 }
 
 # Succeed if UFW is active and does not default-allow inbound traffic.
@@ -2033,13 +2048,13 @@ ufw_is_protecting() {
     has_command ufw || return 1
     local out
     out=$(ufw status verbose 2>/dev/null) || return 1
-    printf '%s\n' "$out" | grep -qw 'active' || return 1
-    ! printf '%s\n' "$out" | grep -qiE '^Default:.*allow \(incoming\)'
+    grep -qw 'active' <<<"$out" || return 1
+    ! grep -qiE '^Default:.*allow \(incoming\)' <<<"$out"
 }
 
 firewalld_is_running() {
     has_command firewall-cmd || return 1
-    firewall-cmd --state 2>/dev/null | grep -q 'running'
+    firewall-cmd --state 2>/dev/null | grep 'running' >/dev/null
 }
 
 check_firewall_status() {
@@ -2134,7 +2149,7 @@ check_intrusion_prevention() {
 
     # Containerised fail2ban/CrowdSec
     if has_command docker && service_is_active docker 2>/dev/null; then
-        if docker ps --format '{{.Image}}' 2>/dev/null | grep -qiE "fail2ban|crowdsec"; then
+        if docker ps --format '{{.Image}}' 2>/dev/null | grep -iE "fail2ban|crowdsec" >/dev/null; then
             protecting="${protecting:+$protecting/}container"
         fi
     fi
@@ -2276,10 +2291,10 @@ check_system_updates() {
             check_security "System Updates" "PASS" "All packages are up to date" ""
         fi
     elif is_numeric "$security_updates" && [[ $security_updates -gt 0 ]]; then
-        check_security "System Updates" "FAIL" "$security_updates security updates available (${total_updates} total)${index_note}" \
+        check_security "System Updates" "FAIL" "$security_updates security $(plural "$security_updates" update updates) available (${total_updates} total)${index_note}" \
             "Install updates now (apt upgrade / dnf upgrade) and reboot if a kernel or libc was updated"
     else
-        check_security "System Updates" "WARN" "$total_updates updates available${index_note}" \
+        check_security "System Updates" "WARN" "$total_updates $(plural "$total_updates" update updates) available${index_note}" \
             "Install updates soon"
     fi
 }
@@ -2335,7 +2350,8 @@ check_failed_logins() {
         return
     fi
 
-    local msg="$failed_count failed login log entries ($log_source)"
+    local msg
+    msg="$failed_count failed login log $(plural "$failed_count" entry entries) ($log_source)"
     if [[ $failed_count -lt ${THRESHOLDS[failed_logins_warn]} ]]; then
         check_security "Failed Logins" "PASS" "$msg" ""
     elif [[ $failed_count -lt ${THRESHOLDS[failed_logins_fail]} ]]; then
@@ -2372,7 +2388,7 @@ check_running_services() {
         return
     fi
 
-    check_security "Running Services" "INFO" "$service_count services are running" \
+    check_security "Running Services" "INFO" "$service_count $(plural "$service_count" "service is" "services are") running" \
         "Review them ('systemctl list-units --type=service --state=running') and disable what you do not use"
 }
 
@@ -2822,6 +2838,10 @@ KNOWN_SAFE_SGID=(
     /usr/bin/wall /usr/bin/write /usr/bin/ssh-agent /usr/bin/expiry
     /usr/bin/chage /usr/bin/crontab /usr/bin/bsd-write /usr/bin/mlocate
     /usr/sbin/unix_chkpwd /usr/sbin/postdrop /usr/sbin/postqueue
+    # Measured on the stock images in tests/matrix.sh: Ubuntu (extrausers),
+    # RHEL family and Amazon Linux (utempter, ssh-keysign), Arch.
+    /usr/sbin/pam_extrausers_chkpwd /usr/bin/unix_chkpwd
+    /usr/libexec/utempter/utempter /usr/libexec/openssh/ssh-keysign
 )
 
 # Scan every local mount for SUID or SGID files and report the ones outside the
@@ -2856,7 +2876,7 @@ scan_special_files() {
     local bit="u-s"
     [[ "$kind" == "SGID" ]] && bit="g-s"
     check_security "${kind} Files" "WARN" \
-        "Found $count ${kind} file(s) outside the standard set: ${shown// /, }${more}" \
+        "Found $count ${kind} $(plural "$count" file files) outside the standard set: ${shown// /, }${more}" \
         "Check that each is expected ('dpkg -S FILE' or 'rpm -qf FILE' shows the owning package); remove the bit from any that is not ('chmod ${bit} FILE')"
     {
         echo "${kind} files outside the standard set:"
@@ -3317,7 +3337,7 @@ check_world_writable() {
         local more=""
         [[ $count -gt 3 ]] && more=" (and $((count - 3)) more; see the report)"
         check_security "World-Writable" "WARN" \
-            "Found $count world-writable directories without the sticky bit: ${shown// /, }${more}" \
+            "Found $count world-writable $(plural "$count" directory directories) without the sticky bit: ${shown// /, }${more}" \
             "Remove world-write ('chmod o-w DIR') or add the sticky bit ('chmod +t DIR') unless the directory is meant to be shared"
         {
             echo "World-writable directories without the sticky bit:"
@@ -3375,7 +3395,7 @@ check_audit_system() {
                 rule_count=$(auditctl -l 2>/dev/null | grep -c "^-" || true)
             fi
             if [[ $rule_count -gt 0 ]]; then
-                check_security "Audit System" "PASS" "auditd is running with $rule_count rules" ""
+                check_security "Audit System" "PASS" "auditd is running with $rule_count $(plural "$rule_count" rule rules)" ""
             else
                 check_security "Audit System" "WARN" "auditd is running but has no rules" \
                     "Add audit rules (e.g. copy /usr/share/doc/auditd/examples/rules/ to /etc/audit/rules.d/)"
@@ -3493,7 +3513,7 @@ check_ssh_key_permissions() {
         check_security "SSH Key Permissions" "PASS" "SSH directories have correct permissions" ""
     else
         local issue_count=${#issues[@]}
-        check_security "SSH Key Permissions" "WARN" "Found $issue_count SSH permission issues" \
+        check_security "SSH Key Permissions" "WARN" "Found $issue_count SSH permission $(plural "$issue_count" issue issues)" \
             "Fix SSH directory permissions: chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
     fi
 }
@@ -3560,9 +3580,10 @@ check_dangerous_protocols() {
     should_run_check "kernel" || return 0
 
     local dangerous_protocols=("dccp" "sctp" "rds" "tipc")
-    local loaded=() proto
+    local loaded=() proto modules
+    modules="$(lsmod 2>/dev/null)"
     for proto in "${dangerous_protocols[@]}"; do
-        if lsmod 2>/dev/null | grep -q "^$proto"; then
+        if grep -q "^$proto" <<<"$modules"; then
             loaded+=("$proto")
         fi
     done
@@ -3708,7 +3729,7 @@ check_log_permissions() {
     if [[ ${#issues[@]} -eq 0 ]]; then
         check_security "Log Permissions" "PASS" "Log file permissions are secure" ""
     else
-        check_security "Log Permissions" "WARN" "Found ${#issues[@]} log permission issues" \
+        check_security "Log Permissions" "WARN" "Found ${#issues[@]} log permission $(plural "${#issues[@]}" issue issues)" \
             "Restrict log file permissions (chmod 640 for sensitive logs)"
     fi
 }
@@ -3727,7 +3748,7 @@ check_secure_boot() {
                 break
             fi
         done
-        if command -v mokutil &>/dev/null && mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot enabled"; then
+        if command -v mokutil &>/dev/null && mokutil --sb-state 2>/dev/null | grep -i "SecureBoot enabled" >/dev/null; then
             status="enabled"
         fi
         case "$status" in
@@ -3757,7 +3778,7 @@ check_process_accounting() {
             accounting_enabled=true
         fi
     fi
-    if command -v lastcomm &>/dev/null && lastcomm 2>/dev/null | head -1 | grep -q .; then
+    if command -v lastcomm &>/dev/null && [[ -n "$(lastcomm 2>/dev/null | head -n 1)" ]]; then
         accounting_enabled=true
     fi
 
@@ -3833,7 +3854,7 @@ check_wireless_interfaces() {
     if [[ $wireless_count -eq 0 ]]; then
         check_security "Wireless Interfaces" "PASS" "No wireless interfaces detected (expected for server)" ""
     else
-        check_security "Wireless Interfaces" "WARN" "Found $wireless_count wireless interface(s)" \
+        check_security "Wireless Interfaces" "WARN" "Found $wireless_count wireless $(plural "$wireless_count" interface interfaces)" \
             "Disable wireless interfaces on production servers if not needed"
     fi
 }
@@ -3852,7 +3873,7 @@ check_usb_storage() {
     if grep -rqE "blacklist usb-storage|install usb-storage /bin/(true|false)" "$MODPROBE_DIR" 2>/dev/null; then
         usb_disabled=true
     fi
-    if lsmod 2>/dev/null | grep -q "usb_storage"; then
+    if lsmod 2>/dev/null | grep "usb_storage" >/dev/null; then
         usb_loaded=true
     fi
 
@@ -3883,7 +3904,7 @@ check_compiler_access() {
     if [[ ${#found_compilers[@]} -eq 0 ]]; then
         check_security "Compiler Access" "PASS" "No compilers installed" ""
     else
-        check_security "Compiler Access" "INFO" "Compiler(s) installed: ${found_compilers[*]}" \
+        check_security "Compiler Access" "INFO" "$(plural "${#found_compilers[@]}" Compiler Compilers) installed: ${found_compilers[*]}" \
             "Optional: remove build toolchains from a production server you do not build on"
     fi
 }
@@ -4258,7 +4279,7 @@ check_sensitive_permissions() {
             "Critical system files have secure permissions" ""
     else
         check_security "Sensitive File Perms" "FAIL" \
-            "Found ${#issues[@]} insecure critical file permission(s): ${issues[0]}" \
+            "Found ${#issues[@]} insecure critical file $(plural "${#issues[@]}" permission permissions): ${issues[0]}" \
             "Fix: chmod 640 /etc/shadow; chmod 440 /etc/sudoers; chmod 600 $SSH_DIR/ssh_host_*_key"
     fi
 }
@@ -4308,10 +4329,10 @@ docker_daemon_security() {
             is_priv=$(docker inspect --format='{{.HostConfig.Privileged}}' "$cid" 2>/dev/null) || is_priv="false"
             [[ "$is_priv" == "true" ]] && ((privileged_count++)) || true
         done <<<"$container_ids"
-        [[ $privileged_count -gt 0 ]] && issues+=("$privileged_count container(s) run with --privileged")
+        [[ $privileged_count -gt 0 ]] && issues+=("$privileged_count $(plural "$privileged_count" container containers) $(plural "$privileged_count" runs run) with --privileged")
     fi
 
-    if docker info 2>/dev/null | grep -qi "rootless"; then
+    if docker info 2>/dev/null | grep -i "rootless" >/dev/null; then
         check_security "Docker Security" "PASS" "Docker is running in rootless mode" ""
     elif [[ ${#issues[@]} -eq 0 ]]; then
         check_security "Docker Security" "PASS" "No Docker daemon or container problems found" ""
@@ -4480,7 +4501,7 @@ check_nfs_exports() {
         check_security "NFS Exports" "PASS" "NFS exports are securely configured" ""
     else
         check_security "NFS Exports" "WARN" \
-            "Found ${#issues[@]} insecure NFS export option(s): ${issues[0]}" \
+            "Found ${#issues[@]} insecure NFS export $(plural "${#issues[@]}" option options): ${issues[0]}" \
             "Remove no_root_squash, wildcard exports, and 'insecure' from /etc/exports"
     fi
 }

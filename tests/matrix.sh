@@ -24,8 +24,10 @@ set -o pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESULTS_DIR="${RESULTS_DIR:-$REPO_DIR/test-results}"
 
-# image|label|kind. kind "distro" runs everything; "bash" images (official
-# Bash builds on Alpine) exist to prove the minimum supported Bash version.
+# image|label|kind. kind "distro" runs everything. "bash" images (official Bash
+# builds on Alpine) run everything too, to cover Bash versions. "floor" images
+# (Bash 4.0-4.3, older than the test harness supports) run only the full audit,
+# which is what proves the minimum Bash version the script claims.
 # Supported releases per https://endoflife.date as of 2026-10; the official
 # Docker Hub `rockylinux` repository is stale (9.3), so the vendor repo is used.
 MATRIX=(
@@ -46,6 +48,10 @@ MATRIX=(
     "alpine:3.24|Alpine 3.24|distro"
     "alpine:3.23|Alpine 3.23|distro"
     "alpine:3.22|Alpine 3.22|distro"
+    "bash:4.0|GNU Bash 4.0|floor"
+    "bash:4.1|GNU Bash 4.1|floor"
+    "bash:4.2|GNU Bash 4.2|floor"
+    "bash:4.3|GNU Bash 4.3|floor"
     "bash:4.4|GNU Bash 4.4|bash"
     "bash:5.1|GNU Bash 5.1|bash"
     "bash:5.3|GNU Bash 5.3|bash"
@@ -78,7 +84,12 @@ validate_result() {
         }
     done
 
-    [[ "$(cat "$dir/tests.exit")" == 0 ]] || echo "unit tests failed (see tests.log)"
+    # Floor images skip the unit tests (the harness needs Bash 4.4) and say so with 77.
+    case "$(cat "$dir/tests.exit")" in
+        0) ;;
+        77) [[ "$kind" == "floor" ]] || echo "unit tests were skipped (see tests.log)" ;;
+        *) echo "unit tests failed (see tests.log)" ;;
+    esac
     # 77 means "skipped: prerequisite missing" - allowed only for scenarios.
     case "$(cat "$dir/scenarios.exit")" in
         0 | 77) ;;
@@ -188,7 +199,7 @@ run_one() {
     [[ -n "${EXTRA_CA_BUNDLE:-}" ]] && ca_args=(-v "$EXTRA_CA_BUNDLE:/extra-ca.crt:ro")
 
     # shellcheck disable=SC2086  # DOCKER_RUN_ARGS is deliberately word-split
-    docker run --rm --privileged ${DOCKER_RUN_ARGS:-} "${ca_args[@]}" \
+    docker run --rm --privileged -e "MATRIX_KIND=$kind" ${DOCKER_RUN_ARGS:-} "${ca_args[@]}" \
         -v "$REPO_DIR:/src:ro" -v "$dir:/out" --entrypoint sh "$image" -c '
             sh /src/tests/container/setup.sh >/out/setup.log 2>&1
             echo $? >/out/setup.exit
@@ -203,6 +214,7 @@ run_one() {
     local bashv tests_line
     bashv="$(awk '/^bash:/ {print $2}' "$dir/env.txt" 2>/dev/null)"
     tests_line="$(grep -E '^Ran [0-9]+ tests' "$dir/tests.log" 2>/dev/null | tail -n 1)"
+    [[ -z "$tests_line" && "$kind" == "floor" ]] && tests_line="audit only"
     local summary="bash ${bashv:-?}; ${tests_line:-no test summary}"
     # One write per image keeps parallel jobs from interleaving their output.
     local result
