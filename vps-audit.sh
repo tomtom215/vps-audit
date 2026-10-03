@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 #
 # VPS Security Audit Tool
-# Version: 2.4.0 (authoritative version is the VERSION constant below)
 #
 # Fork: https://github.com/tomtom215/vps-audit
 # Original: https://github.com/vernu/vps-audit
 #
-# A comprehensive security and performance auditing tool for Linux VPS systems.
-# Supports: Debian, Ubuntu, RHEL, CentOS, Fedora, Rocky, Alma, Arch, Alpine, openSUSE
+# A read-only security audit for Linux VPS servers: it inspects the system,
+# prints PASS/WARN/FAIL results with prioritised fixes, and writes a text
+# and/or JSON report. It never changes system configuration.
+#
+# Distributed as one file on purpose (download, chmod +x, run). The version
+# below is the single source of truth; see CHANGELOG.md for release notes.
 #
 
 # =============================================================================
 # CORE INFRASTRUCTURE & SAFETY
 # =============================================================================
+
+# The PATH the caller invoked us with, before we harden our own below. The
+# "PATH Security" check inspects this one: it describes the environment the
+# operator actually runs commands in, not the one this script rewrote.
+ORIGINAL_PATH="${PATH:-}"
 
 # Fail a pipeline if any component fails, so mis-parses surface instead of
 # silently yielding empty results. We deliberately do NOT use `set -e`/`set -u`:
@@ -45,8 +53,22 @@ export PATH
 # temporary artifact is owner-only from the moment of creation (no race window).
 umask 077
 
-# Script version (semantic). Keep in sync with README changelog and CHANGELOG.
-readonly VERSION="2.4.0"
+# Script version (semantic). Single source of truth: --version, the JSON
+# report and the release workflow all read this line. Update CHANGELOG.md too.
+readonly VERSION="2.5.0"
+
+# Version of the JSON report layout (bump only on a breaking change to it).
+readonly JSON_SCHEMA_VERSION=1
+
+# System paths read by the checks. Plain variables (not environment-overridable
+# and not readonly) so the test suite can point them at fixtures after sourcing
+# this file; nothing in a normal run changes them.
+PASSWD_FILE="/etc/passwd"
+SHADOW_FILE="/etc/shadow"
+PROC_MOUNTS="/proc/mounts"
+PROC_UPTIME="/proc/uptime"
+PROC_LOADAVG="/proc/loadavg"
+SYSTEMD_RUNTIME_DIR="/run/systemd/system"
 
 # Monotonic-ish start time for run duration reporting (traceability).
 SCRIPT_START_EPOCH="$(date +%s 2>/dev/null || echo 0)"
@@ -64,13 +86,52 @@ declare -i PASS_COUNT=0
 declare -i WARN_COUNT=0
 declare -i FAIL_COUNT=0
 declare -i CRITICAL_FAIL_COUNT=0
-declare -a RECOMMENDATIONS=()
+declare -a RECOMMENDATIONS=()   # entries are "PRIORITY|[Check name] text"
+CURRENT_CATEGORY=""            # category of the check function currently running
 
 # =============================================================================
-# PHASE 2: CONFIGURATION & THRESHOLDS
+# CONFIGURATION & THRESHOLDS
 # =============================================================================
 
-# Default configuration (Issue #34)
+# Check categories: the single source of truth for --checks validation, --help,
+# --dry-run, and the README table (a test keeps them in sync). Format is
+# "key|description". A check function opts in with `should_run_check "key"`.
+readonly -a CHECK_CATEGORIES=(
+    "ssh|SSH configuration, hardening and key permissions"
+    "firewall|Host firewall (UFW, firewalld, nftables, iptables)"
+    "ips|Intrusion prevention (fail2ban, CrowdSec)"
+    "updates|Pending updates and automatic updates"
+    "logins|Failed login attempts"
+    "services|Running services and legacy plaintext daemons"
+    "ports|Open ports"
+    "resources|Disk, memory and CPU usage"
+    "sudo|sudo logging and sudoers review"
+    "password|Password policy and account lockout"
+    "suid|SUID/SGID file scan"
+    "mac|SELinux / AppArmor"
+    "kernel|Kernel and network sysctl hardening, risky protocols"
+    "users|User accounts and home directory permissions"
+    "files|Sensitive file, log and umask permissions"
+    "mounts|Mount options of /tmp, /var/tmp and /dev/shm"
+    "time|Time synchronisation"
+    "audit|auditd and process accounting"
+    "integrity|File-integrity monitoring and rootkit scanners"
+    "core|Core dump settings"
+    "cron|Cron permissions and access control"
+    "network|IPv6, wireless, NFS exports and exposed backend services"
+    "docker|Docker daemon and container security"
+    "system|Reboot needed, PATH, boot security, banner, compilers"
+)
+
+# Print the category keys, one per line.
+category_keys() {
+    local entry
+    for entry in "${CHECK_CATEGORIES[@]}"; do
+        printf '%s\n' "${entry%%|*}"
+    done
+}
+
+# Default configuration
 declare -A CONFIG=(
     [output_dir]="."
     [output_format]="text"
@@ -81,9 +142,10 @@ declare -A CONFIG=(
     [quiet]="false"
     [dry_run]="false"
     [show_guide]="false"
+    [color]="auto"
 )
 
-# Configurable thresholds (Issue #37)
+# Configurable thresholds
 declare -A THRESHOLDS=(
     # Resource thresholds
     [disk_warn]=50
@@ -103,7 +165,7 @@ declare -A THRESHOLDS=(
     [public_ports_fail]=5
 )
 
-# OS Information (Issue #64)
+# OS Information
 declare -A OS_INFO=(
     [id]=""
     [id_like]=""
@@ -116,18 +178,38 @@ declare -A OS_INFO=(
 )
 
 # =============================================================================
-# TERMINAL & COLOR HANDLING (Issue #22)
+# TERMINAL, COLOR AND TEXT OUTPUT
 # =============================================================================
+#
+# Output rules (each has a regression test in tests/test_output.sh):
+#   - ASCII only. The script forces LC_ALL=C for parsing, and operators reach
+#     servers through terminals of every charset (PuTTY defaults, serial
+#     consoles), so nothing may depend on UTF-8 being rendered.
+#   - Data is never used as a printf/echo format string and never passed through
+#     `echo -e`: usernames, paths and config lines come from the audited system
+#     and must not be able to inject escape sequences into the operator's
+#     terminal. Colour codes are real ESC bytes, so plain `%s` printing works.
+#   - Colour only on a terminal, and never when NO_COLOR is set to any
+#     non-empty value (https://no-color.org), TERM=dumb, --no-color or --quiet.
+#   - When stdout is a terminal, long lines are wrapped on word boundaries with
+#     a hanging indent; when it is not (cron, pipes, files), lines are left
+#     whole so log tooling can grep them.
+
+# True when stdout is a terminal. A function so tests can override it.
+stdout_is_tty() {
+    [[ -t 1 ]]
+}
 
 init_colors() {
-    if [[ -t 1 ]] && [[ "${NO_COLOR:-}" != "1" ]] && [[ "${CONFIG[quiet]}" != "true" ]]; then
-        readonly GREEN='\033[0;32m'
-        readonly RED='\033[0;31m'
-        readonly YELLOW='\033[1;33m'
-        readonly GRAY='\033[0;90m'
-        readonly BLUE='\033[0;34m'
-        readonly BOLD='\033[1m'
-        readonly NC='\033[0m'
+    if stdout_is_tty && [[ -z "${NO_COLOR:-}" ]] && [[ "${TERM:-}" != "dumb" ]] \
+        && [[ "${CONFIG[color]}" != "false" ]] && [[ "${CONFIG[quiet]}" != "true" ]]; then
+        readonly GREEN=$'\033[0;32m'
+        readonly RED=$'\033[0;31m'
+        readonly YELLOW=$'\033[1;33m'
+        readonly GRAY=$'\033[0;90m'
+        readonly BLUE=$'\033[0;34m'
+        readonly BOLD=$'\033[1m'
+        readonly NC=$'\033[0m'
     else
         readonly GREEN=''
         readonly RED=''
@@ -139,58 +221,143 @@ init_colors() {
     fi
 }
 
+# Width, in columns, that console lines are wrapped to. 0 means "do not wrap"
+# (stdout is not a terminal). Prefers the kernel's window size, then terminfo,
+# then $COLUMNS, then 80; clamped to a sane range.
+TERM_COLS=0
+init_term_width() {
+    TERM_COLS=0
+    stdout_is_tty || return 0
+    local cols=""
+    if has_command stty; then
+        cols=$(stty size <&1 2>/dev/null | awk '{print $2}')
+    fi
+    if ! is_numeric "$cols" || [[ "$cols" -le 0 ]]; then
+        cols=$(tput cols 2>/dev/null)
+    fi
+    if ! is_numeric "$cols" || [[ "$cols" -le 0 ]]; then
+        cols="${COLUMNS:-}"
+    fi
+    if ! is_numeric "$cols" || [[ "$cols" -le 0 ]]; then
+        cols=80
+    fi
+    [[ "$cols" -lt 40 ]] && cols=40
+    [[ "$cols" -gt 200 ]] && cols=200
+    TERM_COLS="$cols"
+}
+
+# Replace control characters (ESC, BEL, CR, ...) with a space so text taken
+# from the audited system can never drive the terminal. Prints the result.
+printable() {
+    local s="$1"
+    printf '%s' "${s//[[:cntrl:]]/ }"
+}
+
+# Wrap TEXT to WIDTH columns on word boundaries. Continuation lines are
+# indented by INDENT spaces and, like the first line, never exceed WIDTH.
+# Words longer than the available width are split. WIDTH 0 disables wrapping.
+# Usage: wrap_text WIDTH INDENT TEXT
+wrap_text() {
+    local width="$1" indent="$2" text="$3"
+    if [[ "$width" -le 0 ]]; then
+        printf '%s\n' "$text"
+        return 0
+    fi
+    local pad=""
+    printf -v pad '%*s' "$indent" ''
+    local -a words=()
+    # -d '' reads to EOF; read -a keeps `*` and friends from being glob-expanded.
+    IFS=$' \t\n' read -r -d '' -a words <<< "$text" || true
+
+    # `prefix` is "" on the first line and the indent afterwards; `line` is the
+    # text accumulated for the current line (without its prefix).
+    local prefix="" line="" word avail=$width
+    local cont=$((width - indent))
+    [[ $cont -lt 1 ]] && cont=1
+
+    for word in "${words[@]}"; do
+        # A word that cannot fit on a line of its own is split across lines.
+        while [[ ${#word} -gt $avail ]]; do
+            if [[ -n "$line" ]]; then
+                printf '%s\n' "$prefix$line"
+                line=""
+            else
+                printf '%s\n' "$prefix${word:0:$avail}"
+                word="${word:$avail}"
+            fi
+            prefix="$pad"
+            avail=$cont
+        done
+        [[ -z "$word" ]] && continue
+        if [[ -z "$line" ]]; then
+            line="$word"
+        elif [[ $((${#line} + 1 + ${#word})) -le $avail ]]; then
+            line="$line $word"
+        else
+            printf '%s\n' "$prefix$line"
+            prefix="$pad"
+            avail=$cont
+            line="$word"
+        fi
+    done
+    [[ -n "$line" ]] && printf '%s\n' "$prefix$line"
+    return 0
+}
+
 # =============================================================================
-# LOGGING SYSTEM (Issue #39)
+# LOGGING
 # =============================================================================
 
 log_debug() {
     if [[ "${CONFIG[verbosity]}" == "verbose" ]]; then
-        echo -e "${GRAY}[DEBUG] $*${NC}" >&2
+        printf '%s\n' "${GRAY}[DEBUG] $(printable "$*")${NC}" >&2
     fi
 }
 
 log_verbose() {
     if [[ "${CONFIG[verbosity]}" != "quiet" ]] && [[ "${CONFIG[quiet]}" != "true" ]]; then
-        echo -e "${GRAY}[INFO] $*${NC}"
+        printf '%s\n' "${GRAY}[INFO] $(printable "$*")${NC}"
     fi
 }
 
 log_error() {
-    echo -e "${RED}[ERROR] $*${NC}" >&2
+    printf '%s\n' "${RED}[ERROR] $(printable "$*")${NC}" >&2
     if [[ -n "$REPORT_FILE" ]] && [[ -f "$REPORT_FILE" ]]; then
-        echo "[ERROR] $*" >> "$REPORT_FILE"
+        printf '[ERROR] %s\n' "$(printable "$*")" >> "$REPORT_FILE"
     fi
 }
 
 log_warning() {
     if [[ "${CONFIG[quiet]}" != "true" ]]; then
-        echo -e "${YELLOW}[WARNING] $*${NC}" >&2
+        printf '%s\n' "${YELLOW}[WARNING] $(printable "$*")${NC}" >&2
     fi
 }
 
-# Output function respecting quiet mode (Issue #75)
+# Print one console line unless --quiet. Callers pass colour variables (real
+# ESC bytes) and plain text; the arguments are printed verbatim, joined by
+# spaces, and are never interpreted as escapes or format strings.
 output() {
     if [[ "${CONFIG[quiet]}" != "true" ]]; then
-        echo -e "$@"
+        printf '%s\n' "$*"
     fi
 }
 
-# Progress indicator for long operations (Issue #41)
+# Progress indicator for long operations
 show_progress() {
     local message="$1"
-    if [[ "${CONFIG[quiet]}" != "true" ]] && [[ -t 1 ]]; then
-        echo -ne "${GRAY}${message}...${NC}\r"
+    if [[ "${CONFIG[quiet]}" != "true" ]] && stdout_is_tty; then
+        printf '%s\r' "${GRAY}${message}...${NC}"
     fi
 }
 
 clear_progress() {
-    if [[ "${CONFIG[quiet]}" != "true" ]] && [[ -t 1 ]]; then
-        echo -ne "\033[2K\r"
+    if [[ "${CONFIG[quiet]}" != "true" ]] && stdout_is_tty; then
+        printf '\033[2K\r'
     fi
 }
 
 # =============================================================================
-# CLEANUP & TRAP HANDLERS (Issue #21)
+# CLEANUP & TRAP HANDLERS
 # =============================================================================
 
 # shellcheck disable=SC2317  # Invoked indirectly via trap
@@ -213,7 +380,7 @@ cleanup() {
 # sourced by the test harness without registering an exit handler in that shell.
 
 # =============================================================================
-# INPUT VALIDATION (Issue #44, #6, #13)
+# INPUT VALIDATION
 # =============================================================================
 
 is_numeric() {
@@ -251,14 +418,14 @@ sanitize_int() {
     echo "$(( 10#${v:-0} ))"
 }
 
-# shellcheck disable=SC2317  # Called from parse_args
+# A usable percentage threshold: an integer from 1 to 100.
 validate_percentage() {
     local value="$1"
-    is_numeric "$value" && [[ $value -le 100 ]]
+    is_numeric "$value" && [[ $((10#$value)) -ge 1 && $((10#$value)) -le 100 ]]
 }
 
 # =============================================================================
-# ROOT CHECK (Issue #9)
+# ROOT CHECK
 # =============================================================================
 
 check_root() {
@@ -391,7 +558,10 @@ detect_tool_versions() {
 # PORTABLE STAT WRAPPER
 # =============================================================================
 
-# Portable stat wrapper that works on GNU and BSD systems
+# Portable stat wrapper that works on GNU and BSD systems. It always follows
+# symlinks (-L): permission checks care about the file a path leads to, and on
+# merged-/usr systems /bin and /sbin are symlinks whose own mode is always 777.
+# Usage: portable_stat uid|gid|mode|size|owner|group|mtime FILE
 portable_stat() {
     local format="$1"
     local file="$2"
@@ -404,36 +574,36 @@ portable_stat() {
     case "${TOOL_INFO[stat_type]}" in
         gnu)
             case "$format" in
-                uid)   stat -c '%u' "$file" 2>/dev/null ;;
-                gid)   stat -c '%g' "$file" 2>/dev/null ;;
-                mode)  stat -c '%a' "$file" 2>/dev/null ;;
-                size)  stat -c '%s' "$file" 2>/dev/null ;;
-                owner) stat -c '%U' "$file" 2>/dev/null ;;
-                group) stat -c '%G' "$file" 2>/dev/null ;;
-                mtime) stat -c '%Y' "$file" 2>/dev/null ;;
+                uid)   stat -L -c '%u' "$file" 2>/dev/null ;;
+                gid)   stat -L -c '%g' "$file" 2>/dev/null ;;
+                mode)  stat -L -c '%a' "$file" 2>/dev/null ;;
+                size)  stat -L -c '%s' "$file" 2>/dev/null ;;
+                owner) stat -L -c '%U' "$file" 2>/dev/null ;;
+                group) stat -L -c '%G' "$file" 2>/dev/null ;;
+                mtime) stat -L -c '%Y' "$file" 2>/dev/null ;;
             esac
             ;;
         bsd)
             case "$format" in
-                uid)   stat -f '%u' "$file" 2>/dev/null ;;
-                gid)   stat -f '%g' "$file" 2>/dev/null ;;
-                mode)  stat -f '%Lp' "$file" 2>/dev/null ;;
-                size)  stat -f '%z' "$file" 2>/dev/null ;;
-                owner) stat -f '%Su' "$file" 2>/dev/null ;;
-                group) stat -f '%Sg' "$file" 2>/dev/null ;;
-                mtime) stat -f '%m' "$file" 2>/dev/null ;;
+                uid)   stat -L -f '%u' "$file" 2>/dev/null ;;
+                gid)   stat -L -f '%g' "$file" 2>/dev/null ;;
+                mode)  stat -L -f '%Lp' "$file" 2>/dev/null ;;
+                size)  stat -L -f '%z' "$file" 2>/dev/null ;;
+                owner) stat -L -f '%Su' "$file" 2>/dev/null ;;
+                group) stat -L -f '%Sg' "$file" 2>/dev/null ;;
+                mtime) stat -L -f '%m' "$file" 2>/dev/null ;;
             esac
             ;;
         *)
             # Fallback: try GNU first, then BSD
             case "$format" in
-                uid)   stat -c '%u' "$file" 2>/dev/null || stat -f '%u' "$file" 2>/dev/null ;;
-                gid)   stat -c '%g' "$file" 2>/dev/null || stat -f '%g' "$file" 2>/dev/null ;;
-                mode)  stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null ;;
-                size)  stat -c '%s' "$file" 2>/dev/null || stat -f '%z' "$file" 2>/dev/null ;;
-                owner) stat -c '%U' "$file" 2>/dev/null || stat -f '%Su' "$file" 2>/dev/null ;;
-                group) stat -c '%G' "$file" 2>/dev/null || stat -f '%Sg' "$file" 2>/dev/null ;;
-                mtime) stat -c '%Y' "$file" 2>/dev/null || stat -f '%m' "$file" 2>/dev/null ;;
+                uid)   stat -L -c '%u' "$file" 2>/dev/null || stat -L -f '%u' "$file" 2>/dev/null ;;
+                gid)   stat -L -c '%g' "$file" 2>/dev/null || stat -L -f '%g' "$file" 2>/dev/null ;;
+                mode)  stat -L -c '%a' "$file" 2>/dev/null || stat -L -f '%Lp' "$file" 2>/dev/null ;;
+                size)  stat -L -c '%s' "$file" 2>/dev/null || stat -L -f '%z' "$file" 2>/dev/null ;;
+                owner) stat -L -c '%U' "$file" 2>/dev/null || stat -L -f '%Su' "$file" 2>/dev/null ;;
+                group) stat -L -c '%G' "$file" 2>/dev/null || stat -L -f '%Sg' "$file" 2>/dev/null ;;
+                mtime) stat -L -c '%Y' "$file" 2>/dev/null || stat -L -f '%m' "$file" 2>/dev/null ;;
             esac
             ;;
     esac
@@ -490,13 +660,13 @@ check_prerequisites() {
     # Print warnings if not in quiet mode
     if [[ ${#warnings[@]} -gt 0 ]] && [[ "${CONFIG[quiet]}" != "true" ]]; then
         for warn in "${warnings[@]}"; do
-            echo -e "${YELLOW}[INFO]${NC} $warn" >&2
+            printf '%s\n' "${YELLOW}[INFO]${NC} $warn" >&2
         done
     fi
 }
 
 # =============================================================================
-# SECURE FILE CREATION (Issues #2, #3)
+# SECURE FILE CREATION
 # =============================================================================
 
 create_report_file() {
@@ -542,7 +712,7 @@ create_report_file() {
 }
 
 # =============================================================================
-# OS DETECTION (Issues #64, #65, #66, #67, #68)
+# OS DETECTION
 # =============================================================================
 
 detect_os() {
@@ -609,8 +779,11 @@ detect_os() {
             ;;
     esac
 
-    # Detect service manager (Issue #66)
-    if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
+    # Detect service manager. systemd counts only when it is actually the
+    # running init: containers and WSL ship a working `systemctl --version`
+    # without systemd being PID 1, and every query then fails. The runtime
+    # directory is the same test sd_booted(3) uses.
+    if [[ -d "$SYSTEMD_RUNTIME_DIR" ]] && command -v systemctl &>/dev/null; then
         OS_INFO[service_manager]="systemd"
     elif command -v rc-service &>/dev/null; then
         OS_INFO[service_manager]="openrc"
@@ -629,7 +802,7 @@ detect_os() {
 }
 
 # =============================================================================
-# PACKAGE MANAGER ABSTRACTION (Issues #14, #15)
+# PACKAGE MANAGER ABSTRACTION
 # =============================================================================
 
 pkg_installed() {
@@ -658,6 +831,19 @@ pkg_installed() {
     esac
 }
 
+# With --no-network the package managers that would refresh repository metadata
+# are told to use their cache only (dnf/yum -C, zypper --no-refresh), so the
+# flag really does keep the audit off the network. apt and pacman answer from
+# local state; apk compares against its local index.
+package_cache_only_flags() {
+    PKG_OFFLINE_FLAGS=()
+    [[ "${CONFIG[skip_network]}" == "true" ]] || return 0
+    case "${OS_INFO[pkg_manager]}" in
+        dnf | yum) PKG_OFFLINE_FLAGS=(-C) ;;
+        zypper) PKG_OFFLINE_FLAGS=(--no-refresh) ;;
+    esac
+}
+
 # Print the number of available package updates, or return 1 (printing nothing)
 # if the count genuinely cannot be determined. The distinction matters: the
 # caller reports "unable to determine" only on a real error, never for a
@@ -665,6 +851,7 @@ pkg_installed() {
 # (dnf/yum use 100 for "updates available"; pacman uses 1 for "none").
 get_update_count() {
     local out rc
+    package_cache_only_flags
 
     case "${OS_INFO[pkg_manager]}" in
         apt)
@@ -674,12 +861,12 @@ get_update_count() {
             ;;
         dnf)
             # 0 = no updates, 100 = updates available, anything else = error
-            out=$(dnf -q check-update 2>/dev/null); rc=$?
+            out=$(dnf -q "${PKG_OFFLINE_FLAGS[@]}" check-update 2>/dev/null); rc=$?
             [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
             printf '%s\n' "$out" | grep -c '^[a-zA-Z0-9]'
             ;;
         yum)
-            out=$(yum -q check-update 2>/dev/null); rc=$?
+            out=$(yum -q "${PKG_OFFLINE_FLAGS[@]}" check-update 2>/dev/null); rc=$?
             [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
             printf '%s\n' "$out" | grep -c '^[a-zA-Z0-9]'
             ;;
@@ -689,7 +876,7 @@ get_update_count() {
             printf '%s\n' "$out" | grep -c '.'
             ;;
         zypper)
-            out=$(zypper -q lu 2>/dev/null); rc=$?
+            out=$(zypper -q "${PKG_OFFLINE_FLAGS[@]}" lu 2>/dev/null); rc=$?
             [[ $rc -ne 0 ]] && return 1
             printf '%s\n' "$out" | grep -c '^v '
             ;;
@@ -713,6 +900,7 @@ get_update_count() {
 # when it cannot be determined for the current package manager.
 get_security_update_count() {
     local out rc
+    package_cache_only_flags
 
     case "${OS_INFO[pkg_manager]}" in
         apt)
@@ -722,13 +910,13 @@ get_security_update_count() {
             printf '%s\n' "$out" | grep '^Inst ' | grep -c -i 'security'
             ;;
         dnf)
-            out=$(dnf -q updateinfo list --security --available 2>/dev/null); rc=$?
+            out=$(dnf -q "${PKG_OFFLINE_FLAGS[@]}" updateinfo list --security --available 2>/dev/null); rc=$?
             [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
             # Count advisory rows only (lines beginning with a severity/advisory id).
             printf '%s\n' "$out" | grep -c -E '^[A-Za-z]'
             ;;
         yum)
-            out=$(yum -q updateinfo list security 2>/dev/null); rc=$?
+            out=$(yum -q "${PKG_OFFLINE_FLAGS[@]}" updateinfo list security 2>/dev/null); rc=$?
             [[ $rc -ne 0 && $rc -ne 100 ]] && return 1
             printf '%s\n' "$out" | grep -c -E '^[A-Za-z]'
             ;;
@@ -741,7 +929,7 @@ get_security_update_count() {
 }
 
 # =============================================================================
-# SERVICE MANAGER ABSTRACTION (Issue #66)
+# SERVICE MANAGER ABSTRACTION
 # =============================================================================
 
 service_is_active() {
@@ -772,7 +960,9 @@ get_running_services_count() {
 
     case "${OS_INFO[service_manager]}" in
         systemd)
-            count=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | wc -l)
+            local units
+            units=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null) || return 1
+            count=$(printf '%s\n' "$units" | count_lines)
             ;;
         openrc)
             count=$(rc-status -s 2>/dev/null | grep -c "started" || true)
@@ -793,38 +983,51 @@ get_running_services_count() {
 }
 
 # =============================================================================
-# PORTABLE COMMAND WRAPPERS (Issue #67)
+# PORTABLE COMMAND WRAPPERS
 # =============================================================================
 
+# Uptime and load come from /proc, which every Linux has, instead of the
+# `uptime` command: it lives in procps, which minimal images (Rocky, Alma,
+# openSUSE containers) do not install, and its flags differ between GNU and
+# BusyBox.
+
+# "up 2 days, 3 hours, 5 minutes" (units of zero are omitted; "up 0 minutes"
+# when under a minute).
 get_uptime() {
-    if uptime -p &>/dev/null 2>&1; then
-        uptime -p
-    else
-        # Fallback for systems without -p flag
-        local uptime_seconds
-        uptime_seconds=$(cut -d. -f1 /proc/uptime 2>/dev/null)
-        if [[ -n "$uptime_seconds" ]]; then
-            local days=$((uptime_seconds / 86400))
-            local hours=$(((uptime_seconds % 86400) / 3600))
-            local minutes=$(((uptime_seconds % 3600) / 60))
-            echo "up ${days} days, ${hours} hours, ${minutes} minutes"
-        else
-            uptime | sed 's/.*up/up/' | sed 's/,.*load.*//'
-        fi
+    local secs
+    secs=$(cut -d. -f1 "$PROC_UPTIME" 2>/dev/null)
+    is_numeric "$secs" || { echo "unknown"; return 1; }
+    local d=$((secs / 86400)) h=$(((secs % 86400) / 3600)) m=$(((secs % 3600) / 60))
+    local -a parts=()
+    [[ $d -gt 0 ]] && parts+=("$d day$([[ $d -ne 1 ]] && echo s)")
+    [[ $h -gt 0 ]] && parts+=("$h hour$([[ $h -ne 1 ]] && echo s)")
+    if [[ $m -gt 0 || ${#parts[@]} -eq 0 ]]; then
+        parts+=("$m minute$([[ $m -ne 1 ]] && echo s)")
     fi
+    local out="" part
+    for part in "${parts[@]}"; do
+        out+="${out:+, }$part"
+    done
+    echo "up $out"
 }
 
 get_uptime_since() {
-    if uptime -s &>/dev/null 2>&1; then
-        uptime -s
+    local secs
+    secs=$(cut -d. -f1 "$PROC_UPTIME" 2>/dev/null)
+    is_numeric "$secs" || { echo "unknown"; return 1; }
+    date -d "@$(($(date +%s) - secs))" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown"
+}
+
+# Load averages as "0.41, 0.68, 0.56", or just the 1-minute figure.
+# Usage: get_load_average [all|1min]
+get_load_average() {
+    local l1 l5 l15 _
+    read -r l1 l5 l15 _ < "$PROC_LOADAVG" 2>/dev/null || return 1
+    [[ -n "$l1" ]] || return 1
+    if [[ "${1:-all}" == "1min" ]]; then
+        echo "$l1"
     else
-        local uptime_seconds
-        uptime_seconds=$(cut -d. -f1 /proc/uptime 2>/dev/null)
-        if [[ -n "$uptime_seconds" ]]; then
-            date -d "@$(($(date +%s) - uptime_seconds))" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown"
-        else
-            echo "unknown"
-        fi
+        echo "$l1, $l5, $l15"
     fi
 }
 
@@ -914,15 +1117,20 @@ get_run_duration() {
 # =============================================================================
 
 print_header() {
-    local header="$1"
-    output "\n${BLUE}${BOLD}$header${NC}"
-    echo -e "\n$header" >> "$REPORT_FILE"
-    echo "================================" >> "$REPORT_FILE"
+    local header
+    header="$(printable "$1")"
+    output ""
+    output "${BLUE}${BOLD}${header}${NC}"
+    {
+        printf '\n%s\n' "$header"
+        printf '%s\n' "================================"
+    } >> "$REPORT_FILE"
 }
 
 print_info() {
-    local label="${1:-}"
-    local value="${2:-}"
+    local label value
+    label="$(printable "${1:-}")"
+    value="$(printable "${2:-}")"
 
     if [[ -z "$label" ]]; then
         log_error "print_info called without label"
@@ -934,11 +1142,71 @@ print_info() {
         value="(not available)"
     fi
 
-    output "${BOLD}$label:${NC} $value"
-    echo "$label: $value" >> "$REPORT_FILE"
+    output "${BOLD}${label}:${NC} ${value}"
+    printf '%s: %s\n' "$label" "$value" >> "$REPORT_FILE"
 }
 
-# Enhanced check_security with recommendations (Issues #43, #70, #71, #42)
+# Recommendation priority, derived from the verdict itself:
+#   1 critical  FAIL flagged critical (fix immediately)
+#   2 high      any other FAIL
+#   3 medium    WARN
+#   4 low       WARN from a check that is defence-in-depth or informational
+# The name is matched exactly, never as a substring, and recommendation text
+# plays no part (it used to, and promoted a key-only root login WARN to
+# "CRITICAL" while demoting a critical failing update to HIGH).
+# Usage: compute_priority STATUS CRITICAL NAME
+compute_priority() {
+    local status="$1" critical="$2" name="$3"
+    if [[ "$status" == "FAIL" ]]; then
+        if [[ "$critical" == "true" ]]; then echo 1; else echo 2; fi
+        return 0
+    fi
+    case "$name" in
+        "Login Banner" | "Process Accounting" | "USB Storage" | "Wireless Interfaces" | \
+            "Compiler Access" | "Secure Boot" | "Bootloader Security" | "Umask Settings" | \
+            "Network Protocols" | "Core Dumps" | "SGID Files")
+            echo 4
+            ;;
+        *)
+            echo 3
+            ;;
+    esac
+}
+
+priority_label() {
+    case "$1" in
+        1) echo critical ;;
+        2) echo high ;;
+        3) echo medium ;;
+        4) echo low ;;
+        *) echo "" ;;
+    esac
+}
+
+# Print one wrapped, coloured result line:  [STATUS] Name - message
+render_result_line() {
+    local status="$1" color="$2" name message
+    name="$(printable "$3")"
+    message="$(printable "$4")"
+    local tag="[$status]"
+    local head="$tag $name"
+    local -a lines=()
+    mapfile -t lines < <(wrap_text "$TERM_COLS" $((${#tag} + 1)) "$head - $message")
+
+    local first="${lines[0]}" line
+    if [[ "$first" == "$head"* ]]; then
+        output "${color}${tag}${NC}${first:${#tag}:$((${#head} - ${#tag}))}${GRAY}${first:${#head}}${NC}"
+    else
+        output "${color}${tag}${NC}${GRAY}${first:${#tag}}${NC}"
+    fi
+    for line in "${lines[@]:1}"; do
+        output "${GRAY}${line}${NC}"
+    done
+}
+
+# Record and print one check result.
+# Usage: check_security NAME STATUS MESSAGE [RECOMMENDATION] [CRITICAL=true|false]
+# STATUS is PASS, WARN or FAIL. CRITICAL only has meaning for FAIL.
 check_security() {
     local test_name="${1:-}"
     local status="${2:-}"
@@ -946,103 +1214,120 @@ check_security() {
     local recommendation="${4:-}"
     local is_critical="${5:-false}"
 
-    # Validate required parameters (Issue #44)
     if [[ -z "$test_name" ]] || [[ -z "$status" ]] || [[ -z "$message" ]]; then
         log_error "check_security called with missing parameters"
         return 1
     fi
 
-    # Validate status value (Issue #43)
     case "$status" in
-        PASS|WARN|FAIL) ;;
+        PASS | WARN | FAIL) ;;
         *)
             log_error "Invalid status '$status' for test '$test_name'"
             return 1
             ;;
     esac
+    [[ "$status" == "FAIL" ]] || is_critical="false"
+    [[ "$is_critical" == "true" ]] || is_critical="false"
 
-    # Record result
-    case $status in
-        "PASS")
+    local color
+    case "$status" in
+        PASS)
             ((PASS_COUNT++)) || true
-            output "${GREEN}[PASS]${NC} $test_name ${GRAY}- $message${NC}"
+            color="$GREEN"
             ;;
-        "WARN")
+        WARN)
             ((WARN_COUNT++)) || true
-            output "${YELLOW}[WARN]${NC} $test_name ${GRAY}- $message${NC}"
+            color="$YELLOW"
             ;;
-        "FAIL")
+        FAIL)
             ((FAIL_COUNT++)) || true
-            if [[ "$is_critical" == "true" ]]; then
-                ((CRITICAL_FAIL_COUNT++)) || true
-            fi
-            output "${RED}[FAIL]${NC} $test_name ${GRAY}- $message${NC}"
+            [[ "$is_critical" == "true" ]] && { ((CRITICAL_FAIL_COUNT++)) || true; }
+            color="$RED"
             ;;
     esac
 
-    echo "[$status] $test_name - $message" >> "$REPORT_FILE"
+    render_result_line "$status" "$color" "$test_name" "$message"
 
-    # Store recommendation for failed/warning checks (Issue #70)
-    if [[ "$status" != "PASS" ]] && [[ -n "$recommendation" ]]; then
-        RECOMMENDATIONS+=("[$test_name] $recommendation")
-        echo "  Recommendation: $recommendation" >> "$REPORT_FILE"
+    {
+        printf '[%s] %s - %s\n' "$status" "$(printable "$test_name")" "$(printable "$message")"
+    } >> "$REPORT_FILE"
+
+    # Store the recommendation for non-passing checks.
+    local priority=""
+    if [[ "$status" != "PASS" ]]; then
+        priority="$(compute_priority "$status" "$is_critical" "$test_name")"
+        if [[ -n "$recommendation" ]]; then
+            RECOMMENDATIONS+=("${priority}|[$test_name] $recommendation")
+            printf '  Recommendation: %s\n' "$(printable "$recommendation")" >> "$REPORT_FILE"
+        fi
     fi
-
     echo "" >> "$REPORT_FILE"
 
-    # Add to JSON output if enabled
     if [[ "${CONFIG[output_format]}" == "json" ]] || [[ "${CONFIG[output_format]}" == "both" ]]; then
-        add_json_result "$test_name" "$status" "$message" "$recommendation" "$is_critical"
+        add_json_result "$test_name" "$status" "$message" "$recommendation" "$is_critical" "$priority"
     fi
 }
 
 # =============================================================================
-# JSON OUTPUT (Issue #72)
+# JSON OUTPUT
 # =============================================================================
 
-# Properly escape a string for safe embedding in JSON (top-level so init_json can use it)
-# Order matters: backslash must be escaped first before any other substitution
+# Escape a string for embedding in a JSON string literal. Backslash must be
+# escaped first. Every control character below U+0020 must be escaped
+# (RFC 8259 section 7): log lines and config files can contain ESC and BEL, and
+# a single raw one makes the whole report unparsable.
 json_escape() {
     local str="$1"
-    str="${str//\\/\\\\}"      # Escape backslashes first
-    str="${str//\"/\\\"}"      # Escape double quotes
-    str="${str//$'\n'/\\n}"    # Escape newlines
-    str="${str//$'\r'/\\r}"    # Escape carriage returns
-    str="${str//$'\t'/\\t}"    # Escape tabs
+    str="${str//\\/\\\\}"
+    str="${str//\"/\\\"}"
+    str="${str//$'\n'/\\n}"
+    str="${str//$'\r'/\\r}"
+    str="${str//$'\t'/\\t}"
+    if [[ "$str" == *[[:cntrl:]]* ]]; then
+        local i hex ch
+        for ((i = 1; i < 32; i++)); do
+            printf -v hex '%02x' "$i"
+            printf -v ch '%b' "\\x$hex"
+            str="${str//"$ch"/\\u00$hex}"
+        done
+    fi
     printf '%s' "$str"
 }
 
+JSON_CHECK_COUNT=0
+
 init_json() {
-    local timestamp hostname_esc os_esc timestamp_esc
+    local timestamp
     timestamp=$(date -Iseconds 2>/dev/null || date)
-    hostname_esc=$(json_escape "$(hostname)")
-    os_esc=$(json_escape "${OS_INFO[name]}")
-    timestamp_esc=$(json_escape "$timestamp")
-    JSON_OUTPUT='{"version":"'"$VERSION"'","timestamp":"'"$timestamp_esc"'","hostname":"'"$hostname_esc"'","os":"'"$os_esc"'","checks":['
+    JSON_CHECK_COUNT=0
+    JSON_OUTPUT='{"version":"'"$VERSION"'","schema_version":'"$JSON_SCHEMA_VERSION"
+    JSON_OUTPUT+=',"timestamp":"'"$(json_escape "$timestamp")"'"'
+    JSON_OUTPUT+=',"hostname":"'"$(json_escape "$(hostname 2>/dev/null)")"'"'
+    JSON_OUTPUT+=',"os":"'"$(json_escape "${OS_INFO[name]}")"'","checks":['
 }
 
+# Usage: add_json_result NAME STATUS MESSAGE RECOMMENDATION CRITICAL PRIORITY
 add_json_result() {
-    local test_name="$1"
-    local status="$2"
-    local message="$3"
-    local recommendation="${4:-}"
-    local is_critical="${5:-false}"
+    local test_name status message recommendation is_critical="${5:-false}" priority="${6:-}"
+    test_name=$(json_escape "$1")
+    status="$2"
+    message=$(json_escape "$3")
+    recommendation=$(json_escape "${4:-}")
 
-    test_name=$(json_escape "$test_name")
-    message=$(json_escape "$message")
-    recommendation=$(json_escape "$recommendation")
+    local priority_json="null" label
+    label="$(priority_label "$priority")"
+    [[ -n "$label" ]] && priority_json="\"$label\""
 
-    local crit="false"
-    [[ "$is_critical" == "true" && "$status" == "FAIL" ]] && crit="true"
+    local entry
+    entry='{"name":"'"$test_name"'","category":"'"$(json_escape "$CURRENT_CATEGORY")"'"'
+    entry+=',"status":"'"$status"'","message":"'"$message"'","recommendation":"'"$recommendation"'"'
+    entry+=',"critical":'"$is_critical"',"priority":'"$priority_json"'}'
 
-    local json_entry
-    json_entry='{"name":"'"$test_name"'","status":"'"$status"'","message":"'"$message"'","recommendation":"'"$recommendation"'","critical":'"$crit"'}'
-
-    if [[ "$JSON_OUTPUT" == *'"checks":['* ]] && [[ "$JSON_OUTPUT" != *'"checks":[]'* ]] && [[ "${JSON_OUTPUT: -1}" != "[" ]]; then
-        JSON_OUTPUT+=",$json_entry"
-    else
-        JSON_OUTPUT+="$json_entry"
+    if [[ $JSON_CHECK_COUNT -gt 0 ]]; then
+        JSON_OUTPUT+=","
     fi
+    JSON_OUTPUT+="$entry"
+    JSON_CHECK_COUNT=$((JSON_CHECK_COUNT + 1))
 }
 
 finalize_json() {
@@ -1051,30 +1336,31 @@ finalize_json() {
     [[ $total -gt 0 ]] && score=$((PASS_COUNT * 100 / total))
     local now duration_s
     now=$(date +%s 2>/dev/null || echo "$SCRIPT_START_EPOCH")
-    duration_s=$(( now - SCRIPT_START_EPOCH ))
+    duration_s=$((now - SCRIPT_START_EPOCH))
     [[ $duration_s -lt 0 ]] && duration_s=0
 
     JSON_OUTPUT+='],"summary":{"pass":'"$PASS_COUNT"',"warn":'"$WARN_COUNT"',"fail":'"$FAIL_COUNT"',"critical_fail":'"$CRITICAL_FAIL_COUNT"',"total":'"$total"',"score":'"$score"',"duration_seconds":'"$duration_s"'}}'
 
     if [[ "${CONFIG[output_format]}" == "json" ]] || [[ "${CONFIG[output_format]}" == "both" ]]; then
         local json_file="${REPORT_FILE%.txt}.json"
-        # Use >| to force overwrite even with noclobber set
+        # >| overrides noclobber (the report path is unique, but be explicit)
         printf '%s\n' "$JSON_OUTPUT" >| "$json_file"
         chmod 600 "$json_file"
-        output "\nJSON report saved to: $json_file"
+        output ""
+        output "JSON report saved to: $json_file"
     fi
 }
 
 # =============================================================================
-# COMMAND LINE ARGUMENT PARSING (Issue #34)
+# COMMAND LINE ARGUMENT PARSING
 # =============================================================================
 
 usage() {
     cat << EOF
 VPS Security Audit Tool v${VERSION}
 
-A comprehensive security auditing tool for Linux VPS systems.
-Run this script on a new VPS to identify security issues and harden your server.
+A read-only security audit for Linux VPS servers. Run it on a new server to
+find what to fix first. It never changes your configuration.
 
 Usage: $0 [OPTIONS]
 
@@ -1082,16 +1368,17 @@ Options:
     -h, --help              Show this help message
     -v, --version           Show version information
     -q, --quiet             Suppress console output (for cron jobs)
-    -o, --output DIR        Output directory for report (default: current)
-    -f, --format FORMAT     Output format: text, json, both (default: text)
+    -o, --output DIR        Output directory for the report (default: current)
+    -f, --format FORMAT     Report format: text, json, both (default: text)
     -V, --verbose           Enable verbose/debug output
-    --guide                 Show quick-start hardening guide for new VPS
-    --no-network            Skip checks requiring network access
-    --no-suid               Skip SUID file scan (can be slow)
-    --checks LIST           Comma-separated list of checks to run
-    --dry-run               Show what checks would run without executing
+    --no-color              Disable colored output (also: NO_COLOR=1)
+    --guide                 Show a quick-start hardening guide for a new VPS
+    --no-network            Do not contact the internet (skips public IP lookup)
+    --no-suid               Skip the SUID/SGID file scan (can be slow)
+    --checks LIST           Comma-separated list of check categories to run
+    --dry-run               Show which checks would run without running them
 
-Threshold Options:
+Threshold Options (percentages are 1-100):
     --disk-warn PCT         Disk usage warning threshold (default: 50)
     --disk-fail PCT         Disk usage failure threshold (default: 80)
     --mem-warn PCT          Memory usage warning threshold (default: 50)
@@ -1099,39 +1386,25 @@ Threshold Options:
     --login-warn NUM        Failed login warning threshold (default: 10)
     --login-fail NUM        Failed login failure threshold (default: 50)
 
-Available Check Categories:
-    ssh         SSH configuration (root login, password auth, port, key permissions)
-    firewall    Firewall status (UFW, firewalld, iptables, nftables)
-    ips         Intrusion prevention (fail2ban, crowdsec)
-    updates     System updates and auto-updates
-    logins      Failed login attempts
-    services    Running services analysis
-    ports       Open ports detection
-    resources   Disk, memory, CPU usage
-    sudo        Sudo logging configuration
-    password    Password policy and account lockout
-    suid        SUID/SGID file scanning
-    mac         SELinux/AppArmor status
-    kernel      Kernel hardening (sysctl settings)
-    users       User account auditing
-    files       File permissions (world-writable, logs, umask)
-    time        Time synchronization
-    audit       Audit daemon status
-    core        Core dump settings
-    cron        Cron security
-    network     Network protocols, IPv6, wireless
+Check Categories (for --checks):
+EOF
+    local entry
+    for entry in "${CHECK_CATEGORIES[@]}"; do
+        printf '    %-12s%s\n' "${entry%%|*}" "${entry#*|}"
+    done
+    cat << EOF
 
 Examples:
     sudo $0                         # Run all checks
-    sudo $0 --guide                 # Show hardening guide for new VPS
-    sudo $0 -q -f json              # Quiet mode with JSON output
-    sudo $0 --no-suid --no-network  # Skip slow/network checks
-    sudo $0 --checks ssh,firewall   # Run only specific checks
+    sudo $0 --guide                 # Show hardening guide for a new VPS
+    sudo $0 -q -f json              # Quiet mode, JSON report (for cron jobs)
+    sudo $0 --no-suid --no-network  # Skip slow / network checks
+    sudo $0 --checks ssh,firewall   # Run only specific categories
 
 Exit Codes:
-    0   All checks passed (or only warnings)
+    0   No check failed (warnings are allowed)
     1   One or more checks failed
-    2   Critical security issues found
+    2   A critical security issue was found
 
 Report bugs to: https://github.com/tomtom215/vps-audit/issues
 EOF
@@ -1183,6 +1456,9 @@ parse_args() {
             -V|--verbose)
                 CONFIG[verbosity]="verbose"
                 ;;
+            --no-color)
+                CONFIG[color]="false"
+                ;;
             --no-network)
                 CONFIG[skip_network]="true"
                 ;;
@@ -1191,7 +1467,7 @@ parse_args() {
                 ;;
             --checks)
                 if [[ -n "${2:-}" ]]; then
-                    CONFIG[checks]="$2"
+                    CONFIG[checks]="${2//[[:space:]]/}"
                     shift
                 else
                     log_error "Option $1 requires an argument"
@@ -1202,38 +1478,38 @@ parse_args() {
                 CONFIG[dry_run]="true"
                 ;;
             --disk-warn)
-                if [[ -n "${2:-}" ]] && is_numeric "$2"; then
+                if [[ -n "${2:-}" ]] && validate_percentage "$2"; then
                     THRESHOLDS[disk_warn]="$2"
                     shift
                 else
-                    log_error "Option $1 requires a numeric argument"
+                    log_error "Option $1 requires a percentage between 1-100"
                     exit 1
                 fi
                 ;;
             --disk-fail)
-                if [[ -n "${2:-}" ]] && is_numeric "$2"; then
+                if [[ -n "${2:-}" ]] && validate_percentage "$2"; then
                     THRESHOLDS[disk_fail]="$2"
                     shift
                 else
-                    log_error "Option $1 requires a numeric argument"
+                    log_error "Option $1 requires a percentage between 1-100"
                     exit 1
                 fi
                 ;;
             --mem-warn)
-                if [[ -n "${2:-}" ]] && is_numeric "$2"; then
+                if [[ -n "${2:-}" ]] && validate_percentage "$2"; then
                     THRESHOLDS[mem_warn]="$2"
                     shift
                 else
-                    log_error "Option $1 requires a numeric argument"
+                    log_error "Option $1 requires a percentage between 1-100"
                     exit 1
                 fi
                 ;;
             --mem-fail)
-                if [[ -n "${2:-}" ]] && is_numeric "$2"; then
+                if [[ -n "${2:-}" ]] && validate_percentage "$2"; then
                     THRESHOLDS[mem_fail]="$2"
                     shift
                 else
-                    log_error "Option $1 requires a numeric argument"
+                    log_error "Option $1 requires a percentage between 1-100"
                     exit 1
                 fi
                 ;;
@@ -1268,6 +1544,8 @@ parse_args() {
         esac
         shift
     done
+
+    validate_check_selection
 
     # Validate threshold relationships: warn must be strictly less than fail
     local -A threshold_pairs=(
@@ -1330,7 +1608,28 @@ load_config() {
     done
 }
 
-# Check if a specific check should run
+# Reject unknown --checks categories. An unknown name used to match nothing, so
+# a typo in a cron job silently ran an empty audit that reported "all clear".
+validate_check_selection() {
+    [[ "${CONFIG[checks]}" == "all" ]] && return 0
+    local valid key bad=() name
+    valid=" $(category_keys | tr '\n' ' ')"
+    local -a requested=()
+    IFS=, read -ra requested <<< "${CONFIG[checks]}"
+    for name in "${requested[@]}"; do
+        [[ -z "$name" ]] && continue
+        [[ "$valid" == *" $name "* ]] || bad+=("$name")
+    done
+    if [[ ${#bad[@]} -gt 0 ]]; then
+        key="$(category_keys | tr '\n' ' ')"
+        log_error "Unknown check category: ${bad[*]}"
+        log_error "Valid categories: ${key% }"
+        exit 1
+    fi
+}
+
+# Check if a specific check should run. On success the category is remembered
+# so results (and the JSON report) can be attributed to it.
 should_run_check() {
     local check_name="$1"
 
@@ -1346,11 +1645,12 @@ should_run_check() {
         fi
     fi
 
+    CURRENT_CATEGORY="$check_name"
     return 0
 }
 
 # =============================================================================
-# SSH CONFIGURATION CHECKS (Issues #5, #23, #24)
+# SSH CONFIGURATION CHECKS
 # =============================================================================
 
 # Cache of the effective sshd configuration as produced by `sshd -T`.
@@ -1548,73 +1848,104 @@ check_ssh_port() {
 }
 
 # =============================================================================
-# FIREWALL CHECKS (Issue #16)
+# FIREWALL CHECKS
 # =============================================================================
+#
+# A host counts as firewalled only if inbound traffic is default-denied: a
+# base chain on the input hook with policy drop, or an unconditional trailing
+# drop/reject. Merely having chains or rules is not enough - Docker creates
+# nftables/iptables chains on every host, and fail2ban's input chain only
+# rejects already-banned addresses - so counting chains or rules reported
+# "firewall active" on hosts with no firewall at all.
+
+# Read `nft list ruleset` on stdin; succeed if a base chain on the input hook,
+# in a table whose family matches the extended regex $1 (e.g. "ip|inet"),
+# default-denies inbound traffic.
+nft_input_default_deny() {
+    awk -v fam="^($1)$" '
+        /^table /          { tfam = $2; next }
+        /^[ \t]*chain /    { hook = 0; next }
+        /hook input/       {
+            if (tfam ~ fam) {
+                hook = 1
+                if ($0 ~ /policy (drop|reject)/) found = 1
+            }
+            next
+        }
+        hook && /^[ \t]*(counter( packets [0-9]+ bytes [0-9]+)?[ \t]+)?(drop|reject)([ \t]+with[ \t].*)?[ \t]*$/ { found = 1 }
+        /^[ \t]*}/         { hook = 0 }
+        END                { exit(found ? 0 : 1) }
+    '
+}
+
+# Succeed if iptables/ip6tables (command name in $1) default-denies inbound
+# traffic: INPUT policy DROP/REJECT, or an unconditional final DROP/REJECT rule.
+iptables_input_default_deny() {
+    local rules
+    rules=$("$1" -S INPUT 2>/dev/null) || return 1
+    printf '%s\n' "$rules" | grep -qE '^-P INPUT (DROP|REJECT)' && return 0
+    printf '%s\n' "$rules" | grep '^-A INPUT ' | tail -n 1 | grep -qE '^-A INPUT -j (DROP|REJECT)( |$)'
+}
+
+# Succeed if UFW is active and does not default-allow inbound traffic.
+ufw_is_protecting() {
+    has_command ufw || return 1
+    local out
+    out=$(ufw status verbose 2>/dev/null) || return 1
+    printf '%s\n' "$out" | grep -qw 'active' || return 1
+    ! printf '%s\n' "$out" | grep -qiE '^Default:.*allow \(incoming\)'
+}
+
+firewalld_is_running() {
+    has_command firewall-cmd || return 1
+    firewall-cmd --state 2>/dev/null | grep -q 'running'
+}
 
 check_firewall_status() {
     should_run_check "firewall" || return 0
 
-    local firewall_found=false
-    local firewall_active=false
-    local firewall_name=""
+    local active="" detail=""
+    local -a installed=()
 
-    # Check UFW (Debian/Ubuntu)
-    if command -v ufw &>/dev/null; then
-        firewall_found=true
-        firewall_name="UFW"
-        if ufw status 2>/dev/null | grep -qw "active"; then
-            firewall_active=true
+    if has_command ufw; then
+        installed+=("UFW")
+        if ufw_is_protecting; then
+            active="UFW"
+            detail="UFW is active and denies inbound traffic by default"
+        fi
+    fi
+    if [[ -z "$active" ]] && has_command firewall-cmd; then
+        installed+=("firewalld")
+        if firewalld_is_running; then
+            active="firewalld"
+            detail="firewalld is running"
+        fi
+    fi
+    if [[ -z "$active" ]] && has_command nft; then
+        installed+=("nftables")
+        if nft list ruleset 2>/dev/null | nft_input_default_deny "ip|inet"; then
+            active="nftables"
+            detail="nftables denies inbound traffic by default"
+        fi
+    fi
+    if [[ -z "$active" ]] && has_command iptables; then
+        installed+=("iptables")
+        if iptables_input_default_deny iptables; then
+            active="iptables"
+            detail="iptables denies inbound traffic by default"
         fi
     fi
 
-    # Check firewalld (RHEL/CentOS/Fedora)
-    if [[ "$firewall_active" == "false" ]] && command -v firewall-cmd &>/dev/null; then
-        firewall_found=true
-        firewall_name="firewalld"
-        if firewall-cmd --state 2>/dev/null | grep -q "running"; then
-            firewall_active=true
-        fi
-    fi
-
-    # Check nftables
-    if [[ "$firewall_active" == "false" ]] && command -v nft &>/dev/null; then
-        firewall_found=true
-        firewall_name="nftables"
-        local rule_count
-        rule_count=$(nft list ruleset 2>/dev/null | grep -c "chain" || true)
-        if [[ ${rule_count:-0} -gt 0 ]]; then
-            firewall_active=true
-        fi
-    fi
-
-    # Check iptables (legacy) - Fixed Issue #16
-    if [[ "$firewall_active" == "false" ]] && command -v iptables &>/dev/null; then
-        firewall_found=true
-        firewall_name="iptables"
-
-        # Count actual rules in INPUT chain (excluding the 2 header lines)
-        local input_rules
-        input_rules=$(iptables -L INPUT -n --line-numbers 2>/dev/null | tail -n +3 | count_lines)
-
-        # Check if default policy is DROP/REJECT (use portable POSIX sed, not grep -P)
-        local input_policy
-        input_policy=$(iptables -L INPUT -n 2>/dev/null | head -1 | sed -n 's/.*policy \([A-Z]*\).*/\1/p')
-        input_policy="${input_policy:-ACCEPT}"
-
-        if [[ $input_rules -gt 0 ]] || [[ "$input_policy" == "DROP" ]] || [[ "$input_policy" == "REJECT" ]]; then
-            firewall_active=true
-        fi
-    fi
-
-    # Report results
-    if [[ "$firewall_found" == "false" ]]; then
-        check_security "Firewall Status" "FAIL" "No firewall tool found" \
-            "Install and configure ufw, firewalld, or iptables" "true"
-    elif [[ "$firewall_active" == "true" ]]; then
-        check_security "Firewall Status ($firewall_name)" "PASS" "$firewall_name is active and protecting the system" ""
+    local provider_note="A cloud provider's network firewall (security groups) is not visible to this script."
+    if [[ -n "$active" ]]; then
+        check_security "Firewall Status ($active)" "PASS" "$detail" ""
+    elif [[ ${#installed[@]} -eq 0 ]]; then
+        check_security "Firewall Status" "FAIL" "No host firewall tool found (ufw, firewalld, nftables, iptables)" \
+            "Install and enable a host firewall, e.g. 'apt install ufw && ufw default deny incoming && ufw allow ssh && ufw enable'. $provider_note" "true"
     else
-        check_security "Firewall Status ($firewall_name)" "FAIL" "$firewall_name installed but not properly configured" \
-            "Enable and configure $firewall_name" "true"
+        local names="${installed[*]}"
+        check_security "Firewall Status" "FAIL" "Installed (${names// /, }) but inbound traffic is not default-denied" \
+            "Set a default-deny inbound policy and allow only the ports you need, e.g. 'ufw default deny incoming && ufw allow ssh && ufw enable'. $provider_note" "true"
     fi
 }
 
@@ -1673,7 +2004,7 @@ check_intrusion_prevention() {
 }
 
 # =============================================================================
-# AUTO-UPDATES CHECK (Issue #14)
+# AUTO-UPDATES CHECK
 # =============================================================================
 
 check_auto_updates() {
@@ -1720,7 +2051,7 @@ check_auto_updates() {
 }
 
 # =============================================================================
-# SYSTEM UPDATES CHECK (Issue #27)
+# SYSTEM UPDATES CHECK
 # =============================================================================
 
 check_system_updates() {
@@ -1754,7 +2085,7 @@ check_system_updates() {
 }
 
 # =============================================================================
-# FAILED LOGINS CHECK (Issue #26)
+# FAILED LOGINS CHECK
 # =============================================================================
 
 check_failed_logins() {
@@ -1823,7 +2154,7 @@ check_failed_logins() {
 }
 
 # =============================================================================
-# RUNNING SERVICES CHECK (Issue #19)
+# RUNNING SERVICES CHECK
 # =============================================================================
 
 check_running_services() {
@@ -1834,6 +2165,16 @@ check_running_services() {
 
     if ! is_numeric "$service_count"; then
         check_security "Running Services" "WARN" "Unable to count running services" ""
+        return
+    fi
+
+    # A booted server always runs at least one service (the SSH daemon you are
+    # connected through, for a start). Zero means the service manager is not
+    # reporting them - a container, or an init system we cannot query - so the
+    # honest verdict is "cannot assess", not "minimal attack surface".
+    if [[ $service_count -eq 0 ]]; then
+        check_security "Running Services" "WARN" \
+            "No running services were reported by the service manager (${OS_INFO[service_manager]}); cannot assess" ""
         return
     fi
 
@@ -1849,7 +2190,7 @@ check_running_services() {
 }
 
 # =============================================================================
-# PORT SECURITY CHECK (Issue #20)
+# PORT SECURITY CHECK
 # =============================================================================
 
 # Classify a listen/bind address as network-reachable ("public") or not
@@ -2064,7 +2405,7 @@ check_cpu_usage() {
 
     local cpu_cores load_avg
     cpu_cores=$(get_cpu_cores || echo 1)
-    load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')
+    load_avg=$(get_load_average 1min)
 
     local message="${cpu_usage}% used (Cores: ${cpu_cores}, Load: ${load_avg:-?})"
 
@@ -2080,7 +2421,7 @@ check_cpu_usage() {
 }
 
 # =============================================================================
-# SUDO LOGGING CHECK (Issue #7)
+# SUDO LOGGING CHECK
 # =============================================================================
 
 check_sudo_logging() {
@@ -2121,7 +2462,7 @@ check_sudo_logging() {
 }
 
 # =============================================================================
-# PASSWORD POLICY CHECK (Issue #30)
+# PASSWORD POLICY CHECK
 # =============================================================================
 
 # Resolve a pwquality setting (minlen, dcredit, ...) from every place a distro
@@ -2199,76 +2540,183 @@ check_password_policy() {
 }
 
 # =============================================================================
-# SUID FILES CHECK (Issue #31, #8)
+# FILESYSTEM SCANNING HELPERS
 # =============================================================================
+
+# Print the mount points a file scan should cover, one per line. `find /
+# -xdev` alone only covers the root filesystem, so SUID files on a separate
+# /home, /var or /opt partition were never examined. Disk-backed filesystems
+# only (no proc/sys/network/overlay mounts); "/" is always included because a
+# container's root filesystem is an overlay.
+#
+# With mode "suid", mounts flagged nosuid are skipped (they cannot hold an
+# effective SUID/SGID binary) and tmpfs/ramfs without nosuid are added, since
+# /tmp is where attackers drop SUID binaries.
+list_local_mountpoints() {
+    local mode="${1:-}"
+    local dev mp fstype opts _rest
+    local -A seen=(["/"]=1)
+    printf '%s\n' "/"
+    while read -r dev mp fstype opts _rest; do
+        # /proc/mounts escapes space, tab and backslash as octal.
+        mp="${mp//\\040/ }"
+        mp="${mp//\\011/$'\t'}"
+        mp="${mp//\\134/\\}"
+        [[ "$mp" == "/" ]] && continue
+        case "$fstype" in
+            ext2 | ext3 | ext4 | xfs | btrfs | zfs | f2fs | jfs | reiserfs) ;;
+            tmpfs | ramfs)
+                [[ "$mode" == "suid" ]] || continue
+                ;;
+            *) continue ;;
+        esac
+        if [[ "$mode" == "suid" && ",$opts," == *",nosuid,"* ]]; then
+            continue
+        fi
+        # Stacked mounts list the same mount point more than once.
+        [[ -n "${seen[$mp]+x}" ]] && continue
+        seen["$mp"]=1
+        printf '%s\n' "$mp"
+    done < "$PROC_MOUNTS"
+}
+
+# Directories that hold container image layers and volumes. On a Docker host
+# they contain hundreds of copies of every SUID binary, and scanning them
+# drowns the real findings (measured: 125 container-layer SUID files next to
+# 11 genuine ones after pulling a single image). Docker's data root may be
+# customised, so ask the daemon when it is available.
+CONTAINER_STORAGE_PATHS=()
+CONTAINER_STORAGE_LOADED=false
+load_container_storage_paths() {
+    [[ "$CONTAINER_STORAGE_LOADED" == "true" ]] && return 0
+    CONTAINER_STORAGE_LOADED=true
+    CONTAINER_STORAGE_PATHS=(
+        /var/lib/docker /var/lib/containerd /var/lib/containers
+        /var/lib/lxc /var/lib/lxd /var/lib/incus
+    )
+    if has_command docker && has_command timeout; then
+        local root
+        root=$(timeout 5 docker info --format '{{.DockerRootDir}}' 2>/dev/null)
+        [[ "$root" == /* ]] && CONTAINER_STORAGE_PATHS+=("$root")
+    fi
+}
+
+# Run `find` on one mount point without leaving its filesystem and without
+# entering container storage. Usage: find_in_mount MOUNTPOINT EXPRESSION...
+find_in_mount() {
+    local mp="$1"
+    shift
+    load_container_storage_paths
+    local -a prune=()
+    local p
+    for p in "${CONTAINER_STORAGE_PATHS[@]}"; do
+        prune+=(-o -path "$p")
+    done
+    find "$mp" -xdev \( "${prune[@]:1}" \) -prune -o "$@" 2>/dev/null
+}
+
+# Find files matching a `find -perm` expression ($2) on every local mount.
+# $1 is the list_local_mountpoints mode. Usage: find_files_by_perm suid -4000
+find_files_by_perm() {
+    local mode="$1" perm="$2" mp
+    while IFS= read -r mp; do
+        [[ -d "$mp" ]] || continue
+        find_in_mount "$mp" -type f -perm "$perm" -print
+    done < <(list_local_mountpoints "$mode")
+}
+
+# =============================================================================
+# SUID / SGID FILES CHECK
+# =============================================================================
+
+# SUID/SGID binaries that ship with the distributions we test (taken from the
+# results of auditing a stock install of each - see tests/matrix.sh). Matching
+# is by exact full path: a suffix or regex match would also exempt a PLANTED
+# binary such as /opt/evil/bin/su.
+KNOWN_SAFE_SUID=(
+    /usr/bin/sudo /usr/bin/sudo.ws /usr/bin/su /usr/bin/passwd /usr/bin/chsh
+    /usr/bin/chfn /usr/bin/newgrp /usr/bin/gpasswd /usr/bin/mount
+    /usr/bin/umount /usr/bin/ping /usr/bin/ping6 /usr/bin/pkexec
+    /usr/bin/crontab /usr/bin/at /usr/bin/expiry /usr/bin/chage
+    /usr/bin/wall /usr/bin/write /usr/bin/ssh-agent /usr/bin/staprun
+    /usr/bin/fusermount /usr/bin/fusermount3 /usr/bin/newuidmap
+    /usr/bin/newgidmap /usr/bin/ksu /usr/bin/unix_chkpwd
+    /usr/bin/pam_timestamp_check
+    /usr/lib/dbus-1.0/dbus-daemon-launch-helper /usr/lib/dbus-daemon-launch-helper
+    /usr/libexec/dbus-1/dbus-daemon-launch-helper
+    /usr/lib/openssh/ssh-keysign /usr/lib/ssh/ssh-keysign
+    /usr/libexec/openssh/ssh-keysign
+    /usr/lib/policykit-1/polkit-agent-helper-1
+    /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1
+    /usr/sbin/pppd /usr/sbin/unix_chkpwd /usr/sbin/postdrop /usr/sbin/postqueue
+    /usr/sbin/pam_timestamp_check /usr/sbin/userhelper
+    /usr/sbin/mount.nfs
+    # Compatibility paths (non-merged-/usr systems)
+    /bin/su /bin/mount /bin/umount /bin/ping /bin/ping6 /sbin/unix_chkpwd
+)
+KNOWN_SAFE_SGID=(
+    /usr/bin/wall /usr/bin/write /usr/bin/ssh-agent /usr/bin/expiry
+    /usr/bin/chage /usr/bin/crontab /usr/bin/bsd-write /usr/bin/mlocate
+    /usr/sbin/unix_chkpwd /usr/sbin/postdrop /usr/sbin/postqueue
+)
+
+# Scan every local mount for SUID or SGID files and report the ones outside the
+# known-safe list.
+# Usage: scan_special_files SUID|SGID SAFE_PATH...
+scan_special_files() {
+    local kind="$1" perm
+    shift
+    [[ "$kind" == "SUID" ]] && perm=-4000 || perm=-2000
+
+    local -A safe=()
+    local f
+    for f in "$@"; do
+        safe["$f"]=1
+    done
+
+    local -a unexpected=()
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        [[ -n "${safe[$f]+x}" ]] && continue
+        unexpected+=("$f")
+    done < <(find_files_by_perm suid "$perm")
+
+    local count=${#unexpected[@]}
+    if [[ $count -eq 0 ]]; then
+        check_security "${kind} Files" "PASS" "No unexpected ${kind} files found" ""
+        return 0
+    fi
+
+    local shown="${unexpected[*]:0:3}" more=""
+    [[ $count -gt 3 ]] && more=" (and $((count - 3)) more; see the report)"
+    local bit="u-s"
+    [[ "$kind" == "SGID" ]] && bit="g-s"
+    check_security "${kind} Files" "WARN" \
+        "Found $count ${kind} file(s) outside the standard set: ${shown// /, }${more}" \
+        "Check that each is expected ('dpkg -S FILE' or 'rpm -qf FILE' shows the owning package); remove the bit from any that is not ('chmod ${bit} FILE')"
+    {
+        echo "${kind} files outside the standard set:"
+        printf '  %s\n' "${unexpected[@]}"
+    } >> "$REPORT_FILE"
+}
 
 check_suid_files() {
     should_run_check "suid" || return 0
-
     if [[ "${CONFIG[skip_suid_scan]}" == "true" ]]; then
-        log_verbose "Skipping SUID scan (--no-suid flag)"
-        return
+        log_verbose "Skipping SUID/SGID scan (--no-suid)"
+        return 0
     fi
-
     show_progress "Scanning for SUID files"
-
-    # Extended list of known safe SUID binaries
-    local known_safe_suid=(
-        "/usr/bin/sudo" "/usr/bin/su" "/usr/bin/passwd" "/usr/bin/chsh"
-        "/usr/bin/chfn" "/usr/bin/newgrp" "/usr/bin/gpasswd" "/usr/bin/mount"
-        "/usr/bin/umount" "/usr/bin/ping" "/usr/bin/ping6" "/usr/bin/pkexec"
-        "/usr/bin/crontab" "/usr/bin/at" "/usr/bin/expiry" "/usr/bin/chage"
-        "/usr/bin/wall" "/usr/bin/write" "/usr/bin/ssh-agent" "/usr/bin/staprun"
-        "/usr/bin/fusermount" "/usr/bin/fusermount3"
-        "/usr/lib/dbus-1.0/dbus-daemon-launch-helper"
-        "/usr/lib/openssh/ssh-keysign"
-        "/usr/lib/policykit-1/polkit-agent-helper-1"
-        "/usr/lib/polkit-1/polkit-agent-helper-1"
-        "/usr/libexec/polkit-agent-helper-1"
-        "/usr/sbin/pppd" "/usr/sbin/unix_chkpwd" "/usr/sbin/postdrop"
-        "/usr/sbin/postqueue"
-        # Compatibility paths
-        "/bin/su" "/bin/mount" "/bin/umount" "/bin/ping" "/bin/ping6"
-        "/sbin/unix_chkpwd"
-    )
-
-    # Exact-match set of known-safe binaries. An associative-array lookup (not a
-    # regex) is used deliberately: the previous suffix-anchored pattern
-    # `(...|/bin/su)$` would also match a PLANTED binary that merely ends in a
-    # safe path, e.g. /opt/evil/bin/su, and silently exclude it from the report
-    # (a security false-negative). Full-path exact matching cannot be evaded.
-    local -A safe_suid=()
-    local safe
-    for safe in "${known_safe_suid[@]}"; do
-        safe_suid["$safe"]=1
-    done
-
-    # Find SUID files, using -xdev to stay on same filesystem (Issue #8)
-    local suspicious_suid=()
-    while IFS= read -r file; do
-        [[ -z "$file" ]] && continue
-        [[ -n "${safe_suid[$file]+x}" ]] && continue
-        suspicious_suid+=("$file")
-    done < <(find / -xdev -type f -perm -4000 2>/dev/null)
-
+    scan_special_files SUID "${KNOWN_SAFE_SUID[@]}"
     clear_progress
+}
 
-    local suid_count=${#suspicious_suid[@]}
-
-    if [[ $suid_count -eq 0 ]]; then
-        check_security "SUID Files" "PASS" "No unexpected SUID files found" ""
-    elif [[ $suid_count -lt 5 ]]; then
-        local files_list="${suspicious_suid[*]}"
-        check_security "SUID Files" "WARN" "Found $suid_count SUID files to review: $files_list" \
-            "Verify these SUID files are legitimate"
-    else
-        check_security "SUID Files" "WARN" "Found $suid_count unexpected SUID files" \
-            "Review SUID files for security - see report for full list"
-        # Log all to report
-        for file in "${suspicious_suid[@]}"; do
-            echo "  SUID file: $file" >> "$REPORT_FILE"
-        done
-    fi
+check_sgid_files() {
+    should_run_check "suid" || return 0
+    [[ "${CONFIG[skip_suid_scan]}" == "true" ]] && return 0
+    show_progress "Scanning for SGID files"
+    scan_special_files SGID "${KNOWN_SAFE_SGID[@]}"
+    clear_progress
 }
 
 # =============================================================================
@@ -2303,10 +2751,10 @@ check_system_restart() {
 }
 
 # =============================================================================
-# NEW SECURITY CHECKS - PHASE 7
+# ADDITIONAL SECURITY CHECKS
 # =============================================================================
 
-# MAC Status Check (Issue #46)
+# MAC Status Check
 check_mac_status() {
     should_run_check "mac" || return 0
 
@@ -2351,114 +2799,199 @@ check_mac_status() {
         "Consider enabling SELinux or AppArmor"
 }
 
-# Kernel Hardening Check (Issue #49)
+# Evaluate a sysctl policy. Entries are "key|op|want" where op is `ge` (the
+# value must be at least `want`: stricter values are fine) or `eq`. A parameter
+# the kernel does not have cannot be configured, so it is left out of the
+# score instead of being counted as insecure. Results:
+#   SYSCTL_ASSESSED  parameters that could be read
+#   SYSCTL_GOOD      how many of them meet the policy
+#   SYSCTL_FIXES     "key = want" for each one that does not
+sysctl_evaluate() {
+    SYSCTL_ASSESSED=0
+    SYSCTL_GOOD=0
+    SYSCTL_FIXES=()
+    local entry key op want actual ok
+    for entry in "$@"; do
+        IFS='|' read -r key op want <<< "$entry"
+        actual=$(sysctl -n "$key" 2>/dev/null) || continue
+        is_integer "$actual" || continue
+        ((SYSCTL_ASSESSED++)) || true
+        ok=false
+        case "$op" in
+            ge) [[ $actual -ge $want ]] && ok=true ;;
+            *) [[ $actual -eq $want ]] && ok=true ;;
+        esac
+        if [[ "$ok" == "true" ]]; then
+            ((SYSCTL_GOOD++)) || true
+        else
+            SYSCTL_FIXES+=("$key = $want")
+        fi
+    done
+}
+
+# Shared verdict for the two sysctl checks.
+# Usage: report_sysctl_result NAME PASS_MESSAGE_NOUN
+report_sysctl_result() {
+    local name="$1" noun="$2"
+    local score="$SYSCTL_GOOD/$SYSCTL_ASSESSED"
+    local fixes
+    fixes="Add to /etc/sysctl.d/99-hardening.conf, then run 'sysctl --system': $(printf '%s; ' "${SYSCTL_FIXES[@]}")"
+    fixes="${fixes%; }"
+    if [[ $SYSCTL_ASSESSED -eq 0 ]]; then
+        check_security "$name" "WARN" "Could not read any $noun setting (sysctl unavailable?)" ""
+    elif [[ $SYSCTL_GOOD -eq $SYSCTL_ASSESSED ]]; then
+        check_security "$name" "PASS" "All $noun settings are hardened ($score)" ""
+    elif [[ $SYSCTL_GOOD -ge $((SYSCTL_ASSESSED / 2)) ]]; then
+        check_security "$name" "WARN" "Partial $noun hardening ($score)" "$fixes"
+    else
+        check_security "$name" "FAIL" "Weak $noun hardening ($score)" "$fixes"
+    fi
+}
+
+# Kernel Hardening Check
 check_kernel_hardening() {
     should_run_check "kernel" || return 0
 
-    local hardening_score=0
-    local max_score=6
-    local issues=()
-
-    declare -A kernel_settings=(
-        ["kernel.randomize_va_space"]="2"
-        ["net.ipv4.tcp_syncookies"]="1"
-        ["net.ipv4.conf.all.rp_filter"]="1"
-        ["net.ipv4.conf.default.rp_filter"]="1"
-        ["kernel.kptr_restrict"]="1"
-        ["kernel.dmesg_restrict"]="1"
-    )
-
-    for setting in "${!kernel_settings[@]}"; do
-        local expected="${kernel_settings[$setting]}"
-        local actual
-        actual=$(sysctl -n "$setting" 2>/dev/null || echo "")
-
-        if [[ "$actual" == "$expected" ]]; then
-            ((hardening_score++)) || true
-        else
-            issues+=("${setting}=${actual:-unset}")
-        fi
-    done
-
-    if [[ $hardening_score -eq $max_score ]]; then
-        check_security "Kernel Hardening" "PASS" "All kernel hardening settings configured ($hardening_score/$max_score)" ""
-    elif [[ $hardening_score -ge $((max_score / 2)) ]]; then
-        check_security "Kernel Hardening" "WARN" "Partial kernel hardening ($hardening_score/$max_score)" \
-            "Configure sysctl settings: ${issues[*]}"
-    else
-        check_security "Kernel Hardening" "FAIL" "Weak kernel hardening ($hardening_score/$max_score)" \
-            "Apply kernel hardening settings via sysctl"
-    fi
+    sysctl_evaluate \
+        "kernel.randomize_va_space|ge|2" \
+        "net.ipv4.tcp_syncookies|ge|1" \
+        "net.ipv4.conf.all.rp_filter|ge|1" \
+        "net.ipv4.conf.default.rp_filter|ge|1" \
+        "kernel.kptr_restrict|ge|1" \
+        "kernel.dmesg_restrict|ge|1"
+    report_sysctl_result "Kernel Hardening" "kernel"
 }
 
-# User Account Auditing (Issue #50)
+# True if a passwd(5) shell field gives an interactive login. An empty field
+# means /bin/sh. nologin/false/sync/shutdown/halt are deliberate non-shells.
+is_login_shell() {
+    case "$1" in
+        */nologin | */false | */sync | */shutdown | */halt) return 1 ;;
+    esac
+    return 0
+}
+
+# First regular-user UID (login.defs UID_MIN, default 1000).
+get_uid_min() {
+    local v
+    v=$(awk '$1 == "UID_MIN" {print $2; exit}' /etc/login.defs 2>/dev/null)
+    is_numeric "$v" && echo "$v" || echo 1000
+}
+
+# User Account Auditing
+# Reports: extra UID 0 accounts, accounts with an EMPTY password that can log
+# in, and system accounts that have an interactive shell. Locked accounts
+# ("!", "!!", "*" in /etc/shadow) are normal and are not "empty".
 check_user_accounts() {
     should_run_check "users" || return 0
 
-    local issues=()
+    local uid_min
+    uid_min=$(get_uid_min)
 
-    # Check for multiple UID 0 accounts
-    local uid0_count
-    uid0_count=$(awk -F: '$3 == 0 {print $1}' /etc/passwd 2>/dev/null | wc -l)
-    if [[ $uid0_count -gt 1 ]]; then
-        local uid0_users
-        uid0_users=$(awk -F: '$3 == 0 {print $1}' /etc/passwd 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-        issues+=("Multiple UID 0: $uid0_users")
+    local -a uid0=() sys_login=() empty=()
+    local -A can_login=()
+    local name uid shell
+    while IFS=: read -r name _ uid _ _ _ shell; do
+        [[ -z "$name" || "$name" == \#* ]] && continue
+        is_numeric "$uid" || continue
+        is_login_shell "$shell" || continue
+        can_login["$name"]=1
+        if [[ $uid -eq 0 ]]; then
+            [[ "$name" != "root" ]] && uid0+=("$name")
+        elif [[ $uid -lt $uid_min ]]; then
+            sys_login+=("$name")
+        fi
+    done < "$PASSWD_FILE"
+
+    # A second UID 0 account is root by another name; it may also have a
+    # non-login shell, so look at it regardless of is_login_shell above.
+    local extra
+    extra=$(awk -F: '$3 == 0 && $1 != "root" {print $1}' "$PASSWD_FILE" 2>/dev/null | tr '\n' ' ')
+    if [[ -n "$extra" ]]; then
+        uid0=()
+        read -ra uid0 <<< "$extra"
     fi
 
-    # Check for users with empty passwords (if readable)
-    if [[ -r /etc/shadow ]]; then
-        local empty_pass
-        empty_pass=$(awk -F: '($2 == "" || $2 == "!!" || $2 == "!") && $1 != "+" {print $1}' /etc/shadow 2>/dev/null | wc -l)
-        # This is normal for locked system accounts, so only warn if there are many
-        log_debug "Accounts with empty/locked passwords: $empty_pass"
+    local root_empty=false
+    if [[ -r "$SHADOW_FILE" ]]; then
+        while IFS=: read -r name hash _; do
+            [[ -z "$name" ]] && continue
+            [[ -z "$hash" && -n "${can_login[$name]+x}" ]] || continue
+            empty+=("$name")
+            [[ "$name" == "root" ]] && root_empty=true
+        done < "$SHADOW_FILE"
     fi
 
-    # Check for system users with login shells
-    local system_login_shells
-    system_login_shells=$(awk -F: '$3 < 1000 && $3 != 0 && $7 !~ /nologin|false|sync|shutdown|halt/ {print $1}' /etc/passwd 2>/dev/null | wc -l)
-    if [[ $system_login_shells -gt 0 ]]; then
-        issues+=("$system_login_shells system accounts with login shells")
+    local -a problems=() recs=()
+    local critical=false fail=false
+    if [[ ${#uid0[@]} -gt 0 ]]; then
+        problems+=("Extra UID 0 accounts: ${uid0[*]}")
+        recs+=("Remove or re-number the extra UID 0 accounts; only root should have UID 0")
+        critical=true
+        fail=true
+    fi
+    if [[ ${#empty[@]} -gt 0 ]]; then
+        problems+=("Accounts with an empty password: ${empty[*]}")
+        recs+=("Lock each account ('passwd -l NAME') or give it a password")
+        fail=true
+        [[ "$root_empty" == "true" ]] && critical=true
+    fi
+    if [[ ${#sys_login[@]} -gt 0 ]]; then
+        problems+=("System accounts with a login shell: ${sys_login[*]}")
+        recs+=("Set the shell of service accounts to /usr/sbin/nologin")
     fi
 
-    if [[ ${#issues[@]} -eq 0 ]]; then
+    if [[ ${#problems[@]} -eq 0 ]]; then
         check_security "User Accounts" "PASS" "No user account issues found" ""
+        return 0
+    fi
+    local msg rec
+    msg=$(printf '%s; ' "${problems[@]}")
+    rec=$(printf '%s; ' "${recs[@]}")
+    if [[ "$fail" == "true" ]]; then
+        check_security "User Accounts" "FAIL" "${msg%; }" "${rec%; }" "$critical"
     else
-        check_security "User Accounts" "WARN" "Issues found: ${issues[*]}" \
-            "Review user accounts and permissions"
+        check_security "User Accounts" "WARN" "${msg%; }" "${rec%; }"
     fi
 }
 
-# World-Writable Files Check (Issue #52)
+# World-Writable Directories Check
+# A world-writable directory without the sticky bit lets any local user delete
+# or replace other users' files in it.
 check_world_writable() {
     should_run_check "files" || return 0
 
-    show_progress "Checking for world-writable files"
+    show_progress "Checking for world-writable directories"
 
-    # Find world-writable directories without sticky bit (more concerning)
-    local ww_dirs
-    ww_dirs=$(find / -xdev -type d -perm -0002 ! -perm -1000 \
-        ! -path "/tmp" ! -path "/var/tmp" ! -path "/dev/shm" \
-        2>/dev/null | head -10)
-
-    local ww_dir_count=0
-    if [[ -n "$ww_dirs" ]]; then
-        ww_dir_count=$(printf '%s\n' "$ww_dirs" | grep -c "^/" || true)
-    fi
+    local ww_dirs=() mp dir
+    while IFS= read -r mp; do
+        [[ -d "$mp" ]] || continue
+        while IFS= read -r dir; do
+            ww_dirs+=("$dir")
+        done < <(find_in_mount "$mp" -type d -perm -0002 ! -perm -1000 \
+            ! -path /tmp ! -path /var/tmp ! -path /dev/shm -print)
+    done < <(list_local_mountpoints)
 
     clear_progress
 
-    if [[ $ww_dir_count -eq 0 ]]; then
-        check_security "World-Writable" "PASS" "No dangerous world-writable directories found" ""
+    local count=${#ww_dirs[@]}
+    if [[ $count -eq 0 ]]; then
+        check_security "World-Writable" "PASS" "No world-writable directories without the sticky bit" ""
     else
-        check_security "World-Writable" "WARN" "Found $ww_dir_count world-writable directories without sticky bit" \
-            "Review and fix permissions on world-writable directories"
-        echo "World-writable directories:" >> "$REPORT_FILE"
-        echo "$ww_dirs" >> "$REPORT_FILE"
+        local shown="${ww_dirs[*]:0:3}"
+        local more=""
+        [[ $count -gt 3 ]] && more=" (and $((count - 3)) more; see the report)"
+        check_security "World-Writable" "WARN" \
+            "Found $count world-writable directories without the sticky bit: ${shown// /, }${more}" \
+            "Remove world-write ('chmod o-w DIR') or add the sticky bit ('chmod +t DIR') unless the directory is meant to be shared"
+        {
+            echo "World-writable directories without the sticky bit:"
+            printf '  %s\n' "${ww_dirs[@]}"
+        } >> "$REPORT_FILE"
     fi
 }
 
-# Time Synchronization Check (Issue #54)
+# Time Synchronization Check
 check_time_sync() {
     should_run_check "time" || return 0
 
@@ -2501,7 +3034,7 @@ check_time_sync() {
     fi
 }
 
-# Audit System Check (Issue #55)
+# Audit System Check
 check_audit_system() {
     should_run_check "audit" || return 0
 
@@ -2528,7 +3061,7 @@ check_audit_system() {
     fi
 }
 
-# Core Dump Settings Check (Issue #62)
+# Core Dump Settings Check
 check_core_dumps() {
     should_run_check "core" || return 0
 
@@ -2585,7 +3118,7 @@ check_core_dumps() {
 }
 
 # =============================================================================
-# PHASE 8: ADDITIONAL PRODUCTION HARDENING CHECKS
+# PRODUCTION HARDENING CHECKS
 # =============================================================================
 
 # SSH Key Permissions Check
@@ -2663,7 +3196,7 @@ check_sgid_files() {
         [[ -z "$file" ]] && continue
         [[ -n "${safe_sgid[$file]+x}" ]] && continue
         suspicious_sgid+=("$file")
-    done < <(find / -xdev -type f -perm -2000 2>/dev/null)
+    done < <(find_files_by_perm suid -2000)
 
     clear_progress
 
@@ -3085,7 +3618,7 @@ check_compiler_access() {
     fi
 }
 
-# Public IP Check (Issue #4)
+# Public IP Check
 get_public_ip() {
     if [[ "${CONFIG[skip_network]}" == "true" ]]; then
         echo "(network checks skipped)"
@@ -3113,7 +3646,7 @@ get_public_ip() {
 }
 
 # =============================================================================
-# PHASE 9: ADVANCED SECURITY CHECKS
+# ADVANCED SECURITY CHECKS
 # =============================================================================
 
 # Extended SSH Hardening Check
@@ -3142,7 +3675,7 @@ check_ssh_hardening_extended() {
     if is_numeric "$max_tries" && [[ $max_tries -le 3 ]]; then
         ((score++)) || true
     else
-        issues+=("MaxAuthTries=${max_tries:-6} (should be ≤3)")
+        issues+=("MaxAuthTries=${max_tries:-6} (should be <=3)")
     fi
 
     # ClientAliveInterval enforces idle session timeout
@@ -3212,7 +3745,7 @@ check_ssh_hardening_extended() {
             "Harden /etc/ssh/sshd_config: ${issues[0]}"
     else
         check_security "SSH Hardening" "FAIL" "SSH poorly hardened ($score/$max_score correct)" \
-            "Disable X11Forwarding, set MaxAuthTries≤3, ClientAliveInterval≤300, restrict AllowUsers"
+            "Disable X11Forwarding, set MaxAuthTries<=3, ClientAliveInterval<=300, restrict AllowUsers"
     fi
 }
 
@@ -3287,7 +3820,7 @@ check_tmp_mount_options() {
         mount_opts=$(awk -v mp="$mountpoint" '$2 == mp {print $4}' /proc/mounts 2>/dev/null)
 
         if [[ -z "$mount_opts" ]]; then
-            # Not a separate mount — inherits root filesystem options (no noexec etc.)
+            # Not a separate mount - inherits root filesystem options (no noexec etc.)
             issues+=("$mountpoint: not separately mounted (noexec/nosuid/nodev unenforced)")
             continue
         fi
@@ -3423,7 +3956,7 @@ check_rootkit_detection() {
 }
 
 # Legacy / Plaintext Service Check
-# Covers: telnet, rsh, rlogin, finger, tftp, talk — all transmit credentials
+# Covers: telnet, rsh, rlogin, finger, tftp, talk - all transmit credentials
 #         in plaintext and must not be present on a production VPS
 check_legacy_services() {
     should_run_check "services" || return 0
@@ -3466,7 +3999,7 @@ check_legacy_services() {
     elif [[ ${#found_legacy[@]} -le 2 ]]; then
         check_security "Legacy Services" "WARN" \
             "Legacy plaintext service daemon(s) present: ${found_legacy[*]}" \
-            "Remove these servers — they transmit credentials in cleartext (use SSH/SFTP instead)"
+            "Remove these servers - they transmit credentials in cleartext (use SSH/SFTP instead)"
     else
         check_security "Legacy Services" "FAIL" \
             "Multiple legacy plaintext service daemons present: ${found_legacy[*]}" \
@@ -3476,7 +4009,7 @@ check_legacy_services() {
 
 # Sensitive System File Permissions Check
 # Covers: /etc/passwd, /etc/shadow, /etc/gshadow, /etc/sudoers, /etc/crontab,
-#         /etc/ssh/sshd_config — world-write or unexpected world-read
+#         /etc/ssh/sshd_config - world-write or unexpected world-read
 check_sensitive_permissions() {
     should_run_check "files" || return 0
 
@@ -3557,7 +4090,7 @@ check_docker_security() {
         if [[ -n "$sock_perms" ]]; then
             local world_bit="${sock_perms: -1}"
             if [[ "$world_bit" =~ [1-7] ]]; then
-                issues+=("Docker socket world-accessible (${sock_perms}) — grants root-equivalent access")
+                issues+=("Docker socket world-accessible (${sock_perms}) - grants root-equivalent access")
             fi
         fi
         if [[ -n "$sock_uid" ]] && [[ "$sock_uid" != "0" ]]; then
@@ -3611,50 +4144,29 @@ check_docker_security() {
 }
 
 # Additional Network Sysctl Hardening Check
-# Covers settings not included in check_kernel_hardening():
-#   ip_forward, source routing, ICMP redirects, sysrq, ptrace_scope
+# Settings not covered by check_kernel_hardening(): forwarding, source
+# routing, ICMP redirects, sysrq, ptrace scope.
 check_network_sysctl() {
     should_run_check "kernel" || return 0
 
-    local score=0
-    local max_score=8
-    local issues=()
-
-    # Declare as local (not global) to avoid polluting scope
-    local -A net_sysctl=(
-        ["net.ipv4.ip_forward"]="0"
-        ["net.ipv4.conf.all.accept_source_route"]="0"
-        ["net.ipv4.conf.all.send_redirects"]="0"
-        ["net.ipv4.conf.all.accept_redirects"]="0"
-        ["net.ipv4.icmp_echo_ignore_broadcasts"]="1"
-        ["net.ipv4.icmp_ignore_bogus_error_responses"]="1"
-        ["kernel.sysrq"]="0"
-        ["kernel.yama.ptrace_scope"]="1"
+    local -a policy=(
+        "net.ipv4.conf.all.accept_source_route|eq|0"
+        "net.ipv4.conf.all.send_redirects|eq|0"
+        "net.ipv4.conf.all.accept_redirects|eq|0"
+        "net.ipv4.icmp_echo_ignore_broadcasts|eq|1"
+        "net.ipv4.icmp_ignore_bogus_error_responses|eq|1"
+        "kernel.sysrq|eq|0"
+        "kernel.yama.ptrace_scope|ge|1"
     )
-
-    for param in "${!net_sysctl[@]}"; do
-        local expected="${net_sysctl[$param]}"
-        local actual
-        actual=$(sysctl -n "$param" 2>/dev/null || echo "")
-        if [[ "$actual" == "$expected" ]]; then
-            ((score++)) || true
-        else
-            issues+=("${param}=${actual:-unset} (want ${expected})")
-        fi
-    done
-
-    if [[ $score -eq $max_score ]]; then
-        check_security "Network Sysctl" "PASS" \
-            "All network hardening sysctl configured ($score/$max_score)" ""
-    elif [[ $score -ge $((max_score / 2)) ]]; then
-        check_security "Network Sysctl" "WARN" \
-            "Partial network sysctl hardening ($score/$max_score)" \
-            "Set in /etc/sysctl.d/99-hardening.conf: ${issues[0]}"
-    else
-        check_security "Network Sysctl" "FAIL" \
-            "Network sysctl hardening insufficient ($score/$max_score)" \
-            "Apply all settings: ip_forward=0, accept_source_route=0, sysrq=0, ptrace_scope≥1"
+    # Packet forwarding is required by container runtimes and VPN/router
+    # setups; telling those hosts to disable it would break them.
+    if ! has_command docker && ! has_command podman && ! has_command wg \
+        && ! has_command virsh && ! has_command lxc; then
+        policy+=("net.ipv4.ip_forward|eq|0")
     fi
+
+    sysctl_evaluate "${policy[@]}"
+    report_sysctl_result "Network Sysctl" "network sysctl"
 }
 
 # Home Directory Permissions Check
@@ -3747,38 +4259,44 @@ check_nfs_exports() {
 }
 
 # PATH Security Check
-# "." in root PATH or world-writable PATH directories allow privilege escalation
+# "." (or an empty entry) in PATH, or a world-writable directory in PATH, lets
+# a local user plant a command that root later runs by name. This inspects the
+# PATH the script was *started with* (ORIGINAL_PATH), because the script
+# prepends trusted directories to its own PATH.
 check_path_security() {
     should_run_check "system" || return 0
 
     local issues=()
-    local current_path="${PATH:-}"
+    local -a path_entries=()
+    # The sentinel keeps `read` from dropping a trailing empty field ("a:" means
+    # "a" plus the current directory); the sentinel itself is discarded below.
+    IFS=: read -ra path_entries <<< "${ORIGINAL_PATH:-}:sentinel"
+    unset "path_entries[$((${#path_entries[@]} - 1))]"
 
-    IFS=: read -ra path_entries <<< "$current_path"
+    local entry perms world_bit
     for entry in "${path_entries[@]}"; do
         # Empty entry or literal "." both mean "current directory"
         if [[ -z "$entry" || "$entry" == "." ]]; then
-            issues+=("PATH contains current directory ('${entry:-empty}') — allows local escalation")
+            issues+=("PATH contains the current directory ('${entry:-empty entry}')")
             continue
         fi
-        # World-writable directory in PATH
+        # World-writable directory in PATH (portable_stat follows symlinks)
         if [[ -d "$entry" ]]; then
-            local perms
             perms=$(portable_stat mode "$entry")
             [[ -z "$perms" ]] && continue
-            local world_bit="${perms: -1}"
+            world_bit="${perms: -1}"
             if [[ "$world_bit" =~ [2367] ]]; then
-                issues+=("World-writable directory in PATH: $entry ($perms)")
+                issues+=("world-writable directory in PATH: $entry ($perms)")
             fi
         fi
     done
 
     if [[ ${#issues[@]} -eq 0 ]]; then
-        check_security "PATH Security" "PASS" "No dangerous entries in root PATH" ""
+        check_security "PATH Security" "PASS" "No dangerous entries in the PATH this script was started with" ""
     else
         check_security "PATH Security" "FAIL" \
-            "Dangerous PATH entry: ${issues[0]}" \
-            "Remove '.' and world-writable directories from PATH in /etc/environment and /root/.bashrc"
+            "${issues[0]}" \
+            "Remove '.', empty entries and world-writable directories from PATH (/etc/environment, /root/.bashrc, sudo secure_path)"
     fi
 }
 
@@ -3823,7 +4341,7 @@ check_exposed_services() {
         # like 2379 from matching inside 23799.
         if printf '%s\n' "$listen_output" | \
            grep -qE "(0\.0\.0\.0:${port}|\*:${port}|\[::\]:${port}|:::${port})([[:space:]]|\$)"; then
-            issues+=("$svc_name (port $port) exposed on all interfaces — should be 127.0.0.1 only")
+            issues+=("$svc_name (port $port) exposed on all interfaces - should be 127.0.0.1 only")
         fi
     done
 
@@ -3837,32 +4355,44 @@ check_exposed_services() {
     else
         check_security "Exposed Services" "FAIL" \
             "${#issues[@]} backend services exposed: ${issues[*]}" \
-            "Bind databases/caches to 127.0.0.1 — world-exposed Redis/MongoDB = instant compromise"
+            "Bind databases/caches to 127.0.0.1 - world-exposed Redis/MongoDB = instant compromise"
     fi
 }
 
 # =============================================================================
-# SUMMARY AND RECOMMENDATIONS (Issues #69, #70, #71)
+# SUMMARY AND RECOMMENDATIONS
 # =============================================================================
 
-# Priority order for recommendations
-get_priority() {
-    local check_name="$1"
-    case "$check_name" in
-        *"Root Login"*|*"Firewall"*|*"Exposed Services"*|*"Legacy Services"*) echo "1-CRITICAL" ;;
-        *"Password Auth"*|*"Updates"*|*"Intrusion"*|*"Sensitive File"*|*"Docker"*) echo "2-HIGH" ;;
-        *"SSH"*|*"Port"*|*"SUID"*|*"Kernel"*|*"Network Sysctl"*|*"Sudoers"*) echo "3-MEDIUM" ;;
-        *) echo "4-LOW" ;;
-    esac
+REPORT_RULE="================================"
+
+# One-line verdict for the summary. Wording follows the number of CRITICAL
+# failures first (that is what needs action) and only then the score band, so
+# "critical" is never claimed for a run that has no critical failure.
+# Usage: get_assessment SCORE CRITICAL_COUNT
+get_assessment() {
+    local score="$1" critical="$2"
+    if [[ $critical -gt 0 ]]; then
+        echo "Critical issues found - fix the CRITICAL items first"
+    elif [[ $score -ge 90 ]]; then
+        echo "Excellent - your server is well hardened"
+    elif [[ $score -ge 70 ]]; then
+        echo "Good - minor improvements recommended"
+    elif [[ $score -ge 50 ]]; then
+        echo "Fair - several issues need attention"
+    else
+        echo "Poor - many hardening gaps; work through the recommendations below"
+    fi
 }
 
 print_summary() {
     local total=$((PASS_COUNT + WARN_COUNT + FAIL_COUNT))
+    local duration
+    duration=$(get_run_duration)
 
     output ""
-    output "================================"
+    output "$REPORT_RULE"
     output "${BOLD}Audit Summary${NC}"
-    output "================================"
+    output "$REPORT_RULE"
     output "${GREEN}PASS:${NC} $PASS_COUNT"
     output "${YELLOW}WARN:${NC} $WARN_COUNT"
     output "${RED}FAIL:${NC} $FAIL_COUNT"
@@ -3872,39 +4402,34 @@ print_summary() {
     output ""
     output "Total checks: $total"
 
-    local duration
-    duration=$(get_run_duration)
-
+    local score=0 assessment="" color="$GREEN"
     if [[ $total -gt 0 ]]; then
-        local score=$((PASS_COUNT * 100 / total))
-        output "Security Score: ${BOLD}${score}%${NC}"
-
-        # Add assessment for beginners
-        if [[ $score -ge 90 ]]; then
-            output "${GREEN}Assessment: Excellent - Your server is well hardened${NC}"
-        elif [[ $score -ge 70 ]]; then
-            output "${YELLOW}Assessment: Good - Minor improvements recommended${NC}"
-        elif [[ $score -ge 50 ]]; then
-            output "${YELLOW}Assessment: Fair - Several security issues need attention${NC}"
-        else
-            output "${RED}Assessment: Poor - Critical security issues found, immediate action required${NC}"
+        score=$((PASS_COUNT * 100 / total))
+        assessment="$(get_assessment "$score" "$CRITICAL_FAIL_COUNT")"
+        if [[ $CRITICAL_FAIL_COUNT -gt 0 || $score -lt 50 ]]; then
+            color="$RED"
+        elif [[ $score -lt 90 ]]; then
+            color="$YELLOW"
         fi
+        output "Security Score: ${BOLD}${score}%${NC}"
+        output "${color}Assessment: ${assessment}${NC}"
     fi
-
     output "${GRAY}Completed in ${duration}${NC}"
 
-    # Write to report
     {
         echo ""
-        echo "================================"
+        echo "$REPORT_RULE"
         echo "AUDIT SUMMARY"
-        echo "================================"
+        echo "$REPORT_RULE"
         echo "PASS: $PASS_COUNT"
         echo "WARN: $WARN_COUNT"
         echo "FAIL: $FAIL_COUNT"
         echo "CRITICAL FAIL: $CRITICAL_FAIL_COUNT"
         echo "Total: $total"
-        [[ $total -gt 0 ]] && echo "Security Score: $((PASS_COUNT * 100 / total))%"
+        if [[ $total -gt 0 ]]; then
+            echo "Security Score: ${score}%"
+            echo "Assessment: ${assessment}"
+        fi
         echo "Duration: $duration"
     } >> "$REPORT_FILE"
 }
@@ -3912,157 +4437,90 @@ print_summary() {
 print_recommendations() {
     if [[ ${#RECOMMENDATIONS[@]} -eq 0 ]]; then
         output ""
-        output "${GREEN}No security recommendations - your system passed all checks!${NC}"
+        output "${GREEN}No recommendations - every check passed.${NC}"
         return
     fi
 
+    local -a titles=("" "CRITICAL (fix immediately)" "HIGH PRIORITY" "MEDIUM PRIORITY" "LOW PRIORITY")
+    local -a colors=("" "$RED" "$YELLOW" "$BLUE" "$GRAY")
+
     output ""
-    output "================================"
-    output "${BOLD}Recommended Actions (Priority Order)${NC}"
-    output "================================"
+    output "$REPORT_RULE"
+    output "${BOLD}Recommended Actions (priority order)${NC}"
+    output "$REPORT_RULE"
     output ""
-    output "${GRAY}Fix these issues in order - CRITICAL items first:${NC}"
-    output ""
-
-    # Sort recommendations by priority
-    local -a critical_recs=()
-    local -a high_recs=()
-    local -a medium_recs=()
-    local -a low_recs=()
-
-    for rec in "${RECOMMENDATIONS[@]}"; do
-        local priority
-        priority=$(get_priority "$rec")
-        case "$priority" in
-            1-*) critical_recs+=("$rec") ;;
-            2-*) high_recs+=("$rec") ;;
-            3-*) medium_recs+=("$rec") ;;
-            *) low_recs+=("$rec") ;;
-        esac
-    done
-
-    local i=1
-
-    # Print CRITICAL
-    if [[ ${#critical_recs[@]} -gt 0 ]]; then
-        output "${RED}── CRITICAL (Fix Immediately) ──${NC}"
-        for rec in "${critical_recs[@]}"; do
-            output "${RED}$i.${NC} $rec"
-            ((i++))
-        done
-        output ""
-    fi
-
-    # Print HIGH
-    if [[ ${#high_recs[@]} -gt 0 ]]; then
-        output "${YELLOW}── HIGH PRIORITY ──${NC}"
-        for rec in "${high_recs[@]}"; do
-            output "${YELLOW}$i.${NC} $rec"
-            ((i++))
-        done
-        output ""
-    fi
-
-    # Print MEDIUM
-    if [[ ${#medium_recs[@]} -gt 0 ]]; then
-        output "${BLUE}── MEDIUM PRIORITY ──${NC}"
-        for rec in "${medium_recs[@]}"; do
-            output "${BLUE}$i.${NC} $rec"
-            ((i++))
-        done
-        output ""
-    fi
-
-    # Print LOW
-    if [[ ${#low_recs[@]} -gt 0 ]]; then
-        output "${GRAY}── LOW PRIORITY ──${NC}"
-        for rec in "${low_recs[@]}"; do
-            output "${GRAY}$i.${NC} $rec"
-            ((i++))
-        done
-    fi
-
-    # Write to report
+    output "${GRAY}Fix these in order, critical items first:${NC}"
     {
         echo ""
-        echo "================================"
+        echo "$REPORT_RULE"
         echo "RECOMMENDED ACTIONS (PRIORITY ORDER)"
-        echo "================================"
-        echo ""
-        local j=1
-
-        if [[ ${#critical_recs[@]} -gt 0 ]]; then
-            echo "── CRITICAL ──"
-            for rec in "${critical_recs[@]}"; do
-                echo "$j. $rec"
-                ((j++))
-            done
-            echo ""
-        fi
-
-        if [[ ${#high_recs[@]} -gt 0 ]]; then
-            echo "── HIGH PRIORITY ──"
-            for rec in "${high_recs[@]}"; do
-                echo "$j. $rec"
-                ((j++))
-            done
-            echo ""
-        fi
-
-        if [[ ${#medium_recs[@]} -gt 0 ]]; then
-            echo "── MEDIUM PRIORITY ──"
-            for rec in "${medium_recs[@]}"; do
-                echo "$j. $rec"
-                ((j++))
-            done
-            echo ""
-        fi
-
-        if [[ ${#low_recs[@]} -gt 0 ]]; then
-            echo "── LOW PRIORITY ──"
-            for rec in "${low_recs[@]}"; do
-                echo "$j. $rec"
-                ((j++))
-            done
-        fi
+        echo "$REPORT_RULE"
     } >> "$REPORT_FILE"
+
+    local n=1 p rec text line shown
+    for p in 1 2 3 4; do
+        shown=false
+        for rec in "${RECOMMENDATIONS[@]}"; do
+            [[ "${rec%%|*}" == "$p" ]] || continue
+            text="$(printable "${rec#*|}")"
+            if [[ "$shown" == "false" ]]; then
+                shown=true
+                output ""
+                output "${colors[$p]}-- ${titles[$p]} --${NC}"
+                printf '\n-- %s --\n' "${titles[$p]}" >> "$REPORT_FILE"
+            fi
+            local -a lines=()
+            mapfile -t lines < <(wrap_text "$TERM_COLS" $((${#n} + 2)) "$n. $text")
+            output "${colors[$p]}${lines[0]%% *}${NC} ${lines[0]#* }"
+            for line in "${lines[@]:1}"; do
+                output "$line"
+            done
+            printf '%s. %s\n' "$n" "$text" >> "$REPORT_FILE"
+            ((n++))
+        done
+    done
 }
 
 # Print quick-start hardening guide for new VPS
 print_quickstart_guide() {
     output ""
-    output "================================"
+    output "$REPORT_RULE"
     output "${BOLD}Quick-Start Hardening Guide${NC}"
-    output "================================"
+    output "$REPORT_RULE"
     output ""
-    output "For a NEW VPS, complete these steps in order:"
+    output "For a NEW VPS, complete these steps in order. Commands are for"
+    output "Debian/Ubuntu; on RHEL-family systems use dnf, firewalld and the"
+    output "'wheel' group instead."
+    output ""
+    output "${YELLOW}${BOLD}Keep your current SSH session open${NC} while you change SSH or firewall"
+    output "settings, and confirm a second login works before closing it."
     output ""
     output "${BOLD}1. Create a non-root user with sudo access:${NC}"
     output "   adduser yourusername"
     output "   usermod -aG sudo yourusername"
     output ""
-    output "${BOLD}2. Set up SSH key authentication:${NC}"
+    output "${BOLD}2. Set up SSH key authentication (from your own computer):${NC}"
     output "   ssh-copy-id yourusername@your-server-ip"
     output ""
     output "${BOLD}3. Disable root login and password auth:${NC}"
-    output "   Edit /etc/ssh/sshd_config:"
-    output "   PermitRootLogin no"
-    output "   PasswordAuthentication no"
-    output "   systemctl restart sshd"
+    output "   Create /etc/ssh/sshd_config.d/10-hardening.conf containing:"
+    output "     PermitRootLogin no"
+    output "     PasswordAuthentication no"
+    output "   sshd -t && systemctl reload ssh"
     output ""
-    output "${BOLD}4. Enable firewall (only allow SSH):${NC}"
+    output "${BOLD}4. Enable a firewall (allow only SSH):${NC}"
     output "   ufw default deny incoming"
     output "   ufw default allow outgoing"
-    output "   ufw allow ssh"
+    output "   ufw allow ssh        # or: ufw allow <your-ssh-port>/tcp"
     output "   ufw enable"
     output ""
-    output "${BOLD}5. Install and configure fail2ban:${NC}"
+    output "${BOLD}5. Install and enable fail2ban:${NC}"
     output "   apt install fail2ban"
-    output "   systemctl enable fail2ban"
+    output "   systemctl enable --now fail2ban"
     output ""
     output "${BOLD}6. Enable automatic security updates:${NC}"
     output "   apt install unattended-upgrades"
-    output "   dpkg-reconfigure unattended-upgrades"
+    output "   dpkg-reconfigure -plow unattended-upgrades"
     output ""
     output "${GRAY}Run this script again after completing these steps.${NC}"
 }
@@ -4091,8 +4549,10 @@ main() {
     # --help/--version early exits before the root check).
     parse_args "$@"
 
-    # Initialize colors (after parsing args to respect --quiet)
+    # Initialize colors and wrap width (after parsing args to respect
+    # --quiet / --no-color)
     init_colors
+    init_term_width
 
     # Show guide if requested (before prerequisites since it doesn't need them)
     if [[ "${CONFIG[show_guide]}" == "true" ]]; then
@@ -4106,40 +4566,14 @@ main() {
         output "The following checks would be performed:"
         output ""
 
-        local checks=(
-            "system:System restart / PATH / boot security checks"
-            "ssh:SSH configuration and hardening checks"
-            "firewall:Firewall status check"
-            "ips:Intrusion prevention check"
-            "updates:System updates check"
-            "logins:Failed login attempts check"
-            "services:Running services and legacy service checks"
-            "ports:Open ports check"
-            "resources:Resource usage checks"
-            "sudo:Sudo logging and sudoers security checks"
-            "password:Password policy check"
-            "suid:SUID/SGID files scan"
-            "mac:SELinux/AppArmor check"
-            "kernel:Kernel hardening and network sysctl checks"
-            "users:User account and home directory checks"
-            "files:File permissions and mount options checks"
-            "time:Time synchronization check"
-            "audit:Audit system, file integrity, and rootkit checks"
-            "core:Core dump settings check"
-            "cron:Cron security check"
-            "network:Network protocol, IPv6, NFS, and exposed services checks"
-            "mounts:Temporary filesystem mount options (noexec/nosuid/nodev)"
-            "integrity:File integrity monitoring and rootkit detection"
-            "docker:Docker daemon and container security checks"
-        )
-
-        for check in "${checks[@]}"; do
-            local name="${check%%:*}"
-            local desc="${check#*:}"
-            if [[ "${CONFIG[checks]}" == "all" ]] || [[ ",${CONFIG[checks]}," =~ ,$name, ]]; then
-                output "  [x] $desc"
+        local entry key desc
+        for entry in "${CHECK_CATEGORIES[@]}"; do
+            key="${entry%%|*}"
+            desc="${entry#*|}"
+            if [[ "${CONFIG[checks]}" == "all" ]] || [[ ",${CONFIG[checks]}," =~ ,$key, ]]; then
+                output "  [x] $(printf '%-10s' "$key") $desc"
             else
-                output "  [ ] $desc (skipped)"
+                output "  [ ] $(printf '%-10s' "$key") $desc (skipped)"
             fi
         done
 
@@ -4149,13 +4583,13 @@ main() {
     # Check prerequisites (after colors so we can show warnings)
     check_prerequisites
 
-    # Check root privileges (Issue #9)
+    # Check root privileges
     check_root
 
-    # Detect OS (Issue #64)
+    # Detect OS
     detect_os
 
-    # Create secure report file (Issues #2, #3)
+    # Create secure report file
     create_report_file
 
     # Disable cleanup on error now that we're past initialization
@@ -4169,8 +4603,7 @@ main() {
     # Print header
     output "${BLUE}${BOLD}VPS Security Audit Tool v${VERSION}${NC}"
     output "${GRAY}https://github.com/tomtom215/vps-audit${NC}"
-    output "${GRAY}Starting audit at $(date)${NC}"
-    output ""
+    output "${GRAY}Started $(date)${NC}"
 
     # Write header to report, including run metadata so a saved report is
     # self-describing and reproducible (traceability).
@@ -4216,7 +4649,7 @@ main() {
     cpu_cores=$(get_cpu_cores || echo "Unknown")
     total_mem=$(get_memory_stats "total_human")
     total_disk=$(df -hP / 2>/dev/null | awk 'NR==2 {print $2}' || echo "Unknown")
-    load_avg=$(uptime | awk -F'load average:' '{print $2}' | xargs 2>/dev/null || echo "Unknown")
+    load_avg=$(get_load_average || echo "Unknown")
 
     print_info "Hostname" "$hostname"
     print_info "Operating System" "${OS_INFO[name]}"
@@ -4253,7 +4686,6 @@ main() {
     check_password_policy
     check_suid_files
 
-    # New security checks (Phase 7)
     check_mac_status
     check_kernel_hardening
     check_user_accounts
@@ -4262,7 +4694,7 @@ main() {
     check_audit_system
     check_core_dumps
 
-    # Additional production hardening checks (Phase 8)
+    # Production hardening checks
     check_ssh_key_permissions
     check_sgid_files
     check_cron_security
@@ -4278,7 +4710,7 @@ main() {
     check_usb_storage
     check_compiler_access
 
-    # Phase 9: Advanced security checks
+    # Advanced security checks
     check_ssh_hardening_extended
     check_sudoers_security
     check_tmp_mount_options
@@ -4312,7 +4744,7 @@ main() {
     } >> "$REPORT_FILE"
 
     output ""
-    output "VPS audit complete. Report saved to: ${BOLD}$REPORT_FILE${NC}"
+    output "Audit complete. Report saved to: ${BOLD}${REPORT_FILE}${NC}"
 
     # Provide helpful hints for new users
     if [[ $CRITICAL_FAIL_COUNT -gt 0 ]]; then
@@ -4327,7 +4759,7 @@ main() {
         output "${YELLOW}Security issues were found. Review the recommendations above.${NC}"
     fi
 
-    # Exit with appropriate code (Issue #42)
+    # Exit with appropriate code
     if [[ $CRITICAL_FAIL_COUNT -gt 0 ]]; then
         exit 2
     elif [[ $FAIL_COUNT -gt 0 ]]; then

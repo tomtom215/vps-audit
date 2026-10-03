@@ -1,0 +1,6 @@
+table ip filter {
+	chain INPUT {
+		type filter hook input priority filter; policy drop;
+		tcp dport 22 counter packets 0 bytes 0 accept
+	}
+}
