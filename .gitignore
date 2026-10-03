@@ -2,11 +2,17 @@
 vps-audit-report*.txt
 vps-audit-report*.json
 
-# Test artifacts
+# Test artifacts (tests/matrix.sh results)
 test-results/
 
 # Configuration files (may contain sensitive settings)
 .vps-audit.conf
+
+# Release build output
+dist/
+
+# Python virtualenvs used for the linters
+.venv/
 
 # Editor and OS files
 .DS_Store
