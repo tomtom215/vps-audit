@@ -26,6 +26,10 @@ test_priority_informational_warn_is_p4() {
     assert_eq 4 "$(compute_priority WARN false "Login Banner")" || return 1
 }
 
+test_priority_info_is_p4() {
+    assert_eq 4 "$(compute_priority INFO false "Anything")" || return 1
+}
+
 test_priority_ignores_recommendation_text() {
     # A name that merely *contains* a high-priority word must not be promoted.
     assert_eq 3 "$(compute_priority WARN false "Compiler Access for Docker")" || return 1
@@ -63,8 +67,17 @@ test_assessment_reports_critical_failures_regardless_of_score() {
     assert_contains "$(get_assessment 95 1)" "ritical" || return 1
 }
 
+# An open FAIL must never read as "Excellent" or "Good".
+test_assessment_never_praises_while_a_fail_is_open() {
+    local a
+    a="$(get_assessment 95 0 1)"
+    assert_not_contains "$a" "Excellent" || return 1
+    assert_not_contains "$a" "Good" || return 1
+    assert_contains "$a" "FAILED" || return 1
+}
+
 test_assessment_bands() {
-    assert_contains "$(get_assessment 95 0)" "Excellent" || return 1
+    assert_contains "$(get_assessment 95 0 0)" "Excellent" || return 1
     assert_contains "$(get_assessment 75 0)" "Good" || return 1
     assert_contains "$(get_assessment 55 0)" "Fair" || return 1
     assert_contains "$(get_assessment 10 0)" "Poor" || return 1
@@ -158,4 +171,41 @@ test_guide_output_is_ascii_and_fits_80_columns() {
     local longest
     longest="$(printf '%s\n' "$OUT" | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')"
     [[ $longest -le 80 ]] || fail "guide has a line of $longest columns"
+}
+
+# --- INFO status --------------------------------------------------------------
+
+test_info_is_shown_but_never_scored() {
+    local d
+    d="$(make_tmp)" || return 1
+    REPORT_FILE="$d/report.txt"
+    : >"$REPORT_FILE"
+    CONFIG[output_format]=text
+    init_colors
+    check_security "Check A" PASS "fine" ""
+    check_security "Check B" INFO "worth knowing" "optional tweak"
+    assert_eq "1 0 0 1" "$PASS_COUNT $WARN_COUNT $FAIL_COUNT $INFO_COUNT" || return 1
+    assert_contains "$(cat "$REPORT_FILE")" "[INFO] Check B - worth knowing" || return 1
+    # The optional tweak is listed, as low priority.
+    assert_eq "4|[Check B] optional tweak" "${RECOMMENDATIONS[0]}" || return 1
+}
+
+test_info_cannot_be_critical() {
+    local d
+    d="$(make_tmp)" || return 1
+    REPORT_FILE="$d/report.txt"
+    : >"$REPORT_FILE"
+    init_colors
+    check_security "Check" INFO "fyi" "" true
+    assert_eq 0 "$CRITICAL_FAIL_COUNT" || return 1
+}
+
+test_invalid_status_is_rejected() {
+    local d
+    d="$(make_tmp)" || return 1
+    REPORT_FILE="$d/report.txt"
+    : >"$REPORT_FILE"
+    init_colors
+    check_security "Check" MAYBE "msg" "" 2>/dev/null && return 1
+    assert_eq 0 "$((PASS_COUNT + WARN_COUNT + FAIL_COUNT + INFO_COUNT))" || return 1
 }

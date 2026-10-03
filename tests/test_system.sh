@@ -237,9 +237,10 @@ test_running_services_zero_is_unknown_not_healthy() {
     assert_not_contains "$RESULT_MSG" "minimal attack surface" || return 1
 }
 
-test_running_services_normal_count_passes() {
+test_running_services_normal_count_is_reported_as_info() {
     get_running_services_count() { echo 12; }
     record_checks
     check_running_services
-    assert_eq PASS "$RESULT_STATUS" || return 1
+    assert_eq INFO "$RESULT_STATUS" || return 1
+    assert_contains "$RESULT_MSG" "12" || return 1
 }

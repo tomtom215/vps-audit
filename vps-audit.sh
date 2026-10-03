@@ -66,6 +66,18 @@ readonly JSON_SCHEMA_VERSION=1
 PASSWD_FILE="/etc/passwd"
 SHADOW_FILE="/etc/shadow"
 PROC_MOUNTS="/proc/mounts"
+APT_LISTS_DIR="/var/lib/apt/lists"
+APT_UPDATE_STAMP="/var/lib/apt/periodic/update-success-stamp"
+DNF_AUTOMATIC_CONF="/etc/dnf/automatic.conf"
+ISSUE_FILE="/etc/issue"
+CRON_ALLOW="/etc/cron.allow"
+CRON_DENY="/etc/cron.deny"
+SUDOERS_FILE="/etc/sudoers"
+SUDOERS_DIR="/etc/sudoers.d"
+SUDOERS_RS="/etc/sudoers-rs"
+USB_BUS_DIR="/sys/bus/usb"
+MODPROBE_DIR="/etc/modprobe.d"
+EFI_DIR="/sys/firmware/efi"
 PROC_UPTIME="/proc/uptime"
 PROC_LOADAVG="/proc/loadavg"
 SYSTEMD_RUNTIME_DIR="/run/systemd/system"
@@ -86,6 +98,7 @@ declare -i PASS_COUNT=0
 declare -i WARN_COUNT=0
 declare -i FAIL_COUNT=0
 declare -i CRITICAL_FAIL_COUNT=0
+declare -i INFO_COUNT=0   # informational results: shown, never scored
 declare -a RECOMMENDATIONS=()   # entries are "PRIORITY|[Check name] text"
 CURRENT_CATEGORY=""            # category of the check function currently running
 
@@ -147,22 +160,20 @@ declare -A CONFIG=(
 
 # Configurable thresholds
 declare -A THRESHOLDS=(
-    # Resource thresholds
-    [disk_warn]=50
-    [disk_fail]=80
-    [mem_warn]=50
-    [mem_fail]=80
-    [cpu_warn]=50
-    [cpu_fail]=80
-    # Security thresholds
+    # Resource usage (percent). Memory is "used" excluding reclaimable cache.
+    [disk_warn]=80
+    [disk_fail]=90
+    [mem_warn]=80
+    [mem_fail]=90
+    # Failed SSH login log entries in the last 24 hours (or today)
     [failed_logins_warn]=10
     [failed_logins_fail]=50
-    [services_warn]=20
-    [services_fail]=40
-    [ports_warn]=10
-    [ports_fail]=20
-    [public_ports_warn]=3
-    [public_ports_fail]=5
+    # Distinct publicly reachable listening ports
+    [public_ports_warn]=6
+    [public_ports_fail]=11
+    # Distinct listening ports in total
+    [ports_warn]=15
+    [ports_fail]=30
 )
 
 # OS Information
@@ -316,7 +327,7 @@ log_debug() {
 
 log_verbose() {
     if [[ "${CONFIG[verbosity]}" != "quiet" ]] && [[ "${CONFIG[quiet]}" != "true" ]]; then
-        printf '%s\n' "${GRAY}[INFO] $(printable "$*")${NC}"
+        printf '%s\n' "${GRAY}[NOTE] $(printable "$*")${NC}"
     fi
 }
 
@@ -660,7 +671,7 @@ check_prerequisites() {
     # Print warnings if not in quiet mode
     if [[ ${#warnings[@]} -gt 0 ]] && [[ "${CONFIG[quiet]}" != "true" ]]; then
         for warn in "${warnings[@]}"; do
-            printf '%s\n' "${YELLOW}[INFO]${NC} $warn" >&2
+            printf '%s\n' "${YELLOW}[NOTE]${NC} $warn" >&2
         done
     fi
 }
@@ -1150,13 +1161,17 @@ print_info() {
 #   1 critical  FAIL flagged critical (fix immediately)
 #   2 high      any other FAIL
 #   3 medium    WARN
-#   4 low       WARN from a check that is defence-in-depth or informational
+#   4 low       INFO, or a WARN from a defence-in-depth check
 # The name is matched exactly, never as a substring, and recommendation text
 # plays no part (it used to, and promoted a key-only root login WARN to
 # "CRITICAL" while demoting a critical failing update to HIGH).
 # Usage: compute_priority STATUS CRITICAL NAME
 compute_priority() {
     local status="$1" critical="$2" name="$3"
+    if [[ "$status" == "INFO" ]]; then
+        echo 4
+        return 0
+    fi
     if [[ "$status" == "FAIL" ]]; then
         if [[ "$critical" == "true" ]]; then echo 1; else echo 2; fi
         return 0
@@ -1206,7 +1221,9 @@ render_result_line() {
 
 # Record and print one check result.
 # Usage: check_security NAME STATUS MESSAGE [RECOMMENDATION] [CRITICAL=true|false]
-# STATUS is PASS, WARN or FAIL. CRITICAL only has meaning for FAIL.
+# STATUS is PASS, WARN, FAIL or INFO. INFO is shown but never scored and never
+# changes the exit code: it is for facts that are worth knowing yet are not a
+# security failure on a correctly run VPS. CRITICAL only has meaning for FAIL.
 check_security() {
     local test_name="${1:-}"
     local status="${2:-}"
@@ -1220,7 +1237,7 @@ check_security() {
     fi
 
     case "$status" in
-        PASS | WARN | FAIL) ;;
+        PASS | WARN | FAIL | INFO) ;;
         *)
             log_error "Invalid status '$status' for test '$test_name'"
             return 1
@@ -1243,6 +1260,10 @@ check_security() {
             ((FAIL_COUNT++)) || true
             [[ "$is_critical" == "true" ]] && { ((CRITICAL_FAIL_COUNT++)) || true; }
             color="$RED"
+            ;;
+        INFO)
+            ((INFO_COUNT++)) || true
+            color="$BLUE"
             ;;
     esac
 
@@ -1339,7 +1360,7 @@ finalize_json() {
     duration_s=$((now - SCRIPT_START_EPOCH))
     [[ $duration_s -lt 0 ]] && duration_s=0
 
-    JSON_OUTPUT+='],"summary":{"pass":'"$PASS_COUNT"',"warn":'"$WARN_COUNT"',"fail":'"$FAIL_COUNT"',"critical_fail":'"$CRITICAL_FAIL_COUNT"',"total":'"$total"',"score":'"$score"',"duration_seconds":'"$duration_s"'}}'
+    JSON_OUTPUT+='],"summary":{"pass":'"$PASS_COUNT"',"warn":'"$WARN_COUNT"',"fail":'"$FAIL_COUNT"',"info":'"$INFO_COUNT"',"critical_fail":'"$CRITICAL_FAIL_COUNT"',"total":'"$total"',"score":'"$score"',"duration_seconds":'"$duration_s"'}}'
 
     if [[ "${CONFIG[output_format]}" == "json" ]] || [[ "${CONFIG[output_format]}" == "both" ]]; then
         local json_file="${REPORT_FILE%.txt}.json"
@@ -1379,10 +1400,10 @@ Options:
     --dry-run               Show which checks would run without running them
 
 Threshold Options (percentages are 1-100):
-    --disk-warn PCT         Disk usage warning threshold (default: 50)
-    --disk-fail PCT         Disk usage failure threshold (default: 80)
-    --mem-warn PCT          Memory usage warning threshold (default: 50)
-    --mem-fail PCT          Memory usage failure threshold (default: 80)
+    --disk-warn PCT         Disk usage warning threshold (default: 80)
+    --disk-fail PCT         Disk usage failure threshold (default: 90)
+    --mem-warn PCT          Memory usage warning threshold (default: 80)
+    --mem-fail PCT          Memory usage failure threshold (default: 90)
     --login-warn NUM        Failed login warning threshold (default: 10)
     --login-fail NUM        Failed login failure threshold (default: 50)
 
@@ -1800,17 +1821,70 @@ check_ssh_root_login() {
     esac
 }
 
+# Succeeds if someone can log in over SSH using only an account password.
+# Three settings decide it, and PasswordAuthentication is only one of them:
+# keyboard-interactive authentication through PAM also asks for the account
+# password (verified on a live sshd: PasswordAuthentication no +
+# KbdInteractiveAuthentication yes + UsePAM yes still let a password login in),
+# and AuthenticationMethods can require more than a password.
+# Sets SSH_PASSWORD_PATH to "password", "keyboard-interactive" or "".
+ssh_password_login_possible() {
+    SSH_PASSWORD_PATH=""
+    local pw kbd pam methods
+    pw=$(get_ssh_config "PasswordAuthentication" "yes")
+    kbd=$(get_ssh_config "KbdInteractiveAuthentication" "yes")
+    # sshd -T always prints usepam when PAM is built in; builds without PAM
+    # (Alpine) omit it, and then keyboard-interactive has nothing to ask.
+    pam=$(get_ssh_config "UsePAM" "no")
+    methods=$(get_ssh_config "AuthenticationMethods" "any")
+
+    local pw_ok=false kbd_ok=false
+    [[ "$pw" == "yes" ]] && pw_ok=true
+    [[ "$kbd" == "yes" && "$pam" == "yes" ]] && kbd_ok=true
+
+    if [[ "$methods" != "any" ]]; then
+        # Space separates alternatives; a comma chains methods that must ALL
+        # succeed. Only an alternative made solely of password-type methods
+        # lets a password alone in.
+        local alt m only_pw only_kbd pw_alt=false kbd_alt=false
+        for alt in $methods; do
+            only_pw=true
+            only_kbd=true
+            local -a seq=()
+            IFS=, read -ra seq <<< "$alt"
+            for m in "${seq[@]}"; do
+                [[ "$m" == "password" ]] || only_pw=false
+                [[ "$m" == "keyboard-interactive" || "$m" == "keyboard-interactive:pam" ]] || only_kbd=false
+            done
+            [[ "$only_pw" == "true" ]] && pw_alt=true
+            [[ "$only_kbd" == "true" ]] && kbd_alt=true
+        done
+        [[ "$pw_alt" == "true" ]] || pw_ok=false
+        [[ "$kbd_alt" == "true" ]] || kbd_ok=false
+    fi
+
+    if [[ "$pw_ok" == "true" ]]; then
+        SSH_PASSWORD_PATH="password"
+    elif [[ "$kbd_ok" == "true" ]]; then
+        SSH_PASSWORD_PATH="keyboard-interactive"
+    fi
+    [[ -n "$SSH_PASSWORD_PATH" ]]
+}
+
 check_ssh_password_auth() {
     should_run_check "ssh" || return 0
 
-    local ssh_password
-    ssh_password=$(get_ssh_config "PasswordAuthentication" "yes")
-
-    if [[ "$ssh_password" == "no" ]]; then
-        check_security "SSH Password Auth" "PASS" "Password authentication disabled, key-based only" ""
+    if ssh_password_login_possible; then
+        if [[ "$SSH_PASSWORD_PATH" == "password" ]]; then
+            check_security "SSH Password Auth" "WARN" "Password authentication is enabled" \
+                "Set 'PasswordAuthentication no' (after confirming key login works) so only SSH keys are accepted"
+        else
+            check_security "SSH Password Auth" "WARN" \
+                "PasswordAuthentication is off, but keyboard-interactive login through PAM still accepts the account password" \
+                "Set 'KbdInteractiveAuthentication no' (or 'AuthenticationMethods publickey') in addition to 'PasswordAuthentication no'"
+        fi
     else
-        check_security "SSH Password Auth" "WARN" "Password authentication enabled" \
-            "Consider disabling password auth and using SSH keys only"
+        check_security "SSH Password Auth" "PASS" "Password logins are disabled (key-based only)" ""
     fi
 }
 
@@ -1953,53 +2027,62 @@ check_firewall_status() {
 # INTRUSION PREVENTION CHECK
 # =============================================================================
 
+# Intrusion prevention that actually blocks something:
+#   fail2ban  running AND at least one jail enabled (some distributions ship
+#             every jail disabled);
+#   CrowdSec  the engine only detects - a firewall bouncer does the blocking.
+# Without any, the verdict depends on whether SSH accepts passwords at all: with
+# key-only SSH there is little for these tools to protect.
 check_intrusion_prevention() {
     should_run_check "ips" || return 0
 
-    local ips_installed=false
-    local ips_active=false
-    local ips_name=""
+    local protecting="" problem=""
 
-    # Check fail2ban
     if pkg_installed fail2ban; then
-        ips_installed=true
-        ips_name="Fail2ban"
         if service_is_active fail2ban; then
-            ips_active=true
+            local jails
+            jails=$(fail2ban-client status 2>/dev/null | awk -F: '/Number of jail/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')
+            if is_numeric "$jails" && [[ $jails -eq 0 ]]; then
+                problem="fail2ban is running but has no jails enabled"
+            else
+                protecting="Fail2ban"
+            fi
+        else
+            problem="fail2ban is installed but not running"
         fi
     fi
 
-    # Check CrowdSec
     if pkg_installed crowdsec; then
-        ips_installed=true
-        ips_name="${ips_name:+$ips_name/}CrowdSec"
         if service_is_active crowdsec; then
-            ips_active=true
+            if pkg_installed crowdsec-firewall-bouncer-nftables || pkg_installed crowdsec-firewall-bouncer-iptables \
+                || pkg_installed crowdsec-firewall-bouncer || service_is_active crowdsec-firewall-bouncer; then
+                protecting="${protecting:+$protecting/}CrowdSec"
+            else
+                problem="${problem:+$problem; }CrowdSec is running without a firewall bouncer, so it detects but does not block"
+            fi
+        else
+            problem="${problem:+$problem; }CrowdSec is installed but not running"
         fi
     fi
 
-    # Check Docker containers for fail2ban/crowdsec
-    if command -v docker &>/dev/null && service_is_active docker 2>/dev/null; then
-        if docker ps --format '{{.Image}}' 2>/dev/null | grep -qi "fail2ban"; then
-            ips_installed=true
-            ips_active=true
-            ips_name="${ips_name:+$ips_name/}Fail2ban (Docker)"
-        fi
-        if docker ps --format '{{.Image}}' 2>/dev/null | grep -qi "crowdsec"; then
-            ips_installed=true
-            ips_active=true
-            ips_name="${ips_name:+$ips_name/}CrowdSec (Docker)"
+    # Containerised fail2ban/CrowdSec
+    if has_command docker && service_is_active docker 2>/dev/null; then
+        if docker ps --format '{{.Image}}' 2>/dev/null | grep -qiE "fail2ban|crowdsec"; then
+            protecting="${protecting:+$protecting/}container"
         fi
     fi
 
-    if [[ "$ips_active" == "true" ]]; then
-        check_security "Intrusion Prevention" "PASS" "$ips_name is installed and running" ""
-    elif [[ "$ips_installed" == "true" ]]; then
-        check_security "Intrusion Prevention" "WARN" "$ips_name is installed but not running" \
-            "Start the intrusion prevention service"
+    if [[ -n "$protecting" ]]; then
+        check_security "Intrusion Prevention" "PASS" "$protecting is running and blocking" ""
+    elif [[ -n "$problem" ]]; then
+        check_security "Intrusion Prevention" "WARN" "$problem" \
+            "Enable at least one jail (e.g. 'sshd') in /etc/fail2ban/jail.d/, or install a CrowdSec firewall bouncer"
+    elif ssh_password_login_possible; then
+        check_security "Intrusion Prevention" "WARN" "No intrusion prevention found while SSH accepts passwords" \
+            "Install fail2ban ('apt install fail2ban') or CrowdSec, or switch SSH to keys only"
     else
-        check_security "Intrusion Prevention" "FAIL" "No intrusion prevention system found" \
-            "Install fail2ban or crowdsec"
+        check_security "Intrusion Prevention" "INFO" "No intrusion prevention found (SSH is key-only, so less is exposed)" \
+            "Optional: install fail2ban or CrowdSec to cut brute-force noise"
     fi
 }
 
@@ -2007,47 +2090,72 @@ check_intrusion_prevention() {
 # AUTO-UPDATES CHECK
 # =============================================================================
 
+# Value of an APT::Periodic setting (empty if unset), via apt-config so every
+# drop-in under /etc/apt/apt.conf.d is honoured.
+apt_periodic_value() {
+    apt-config dump 2>/dev/null | awk -F'"' -v k="APT::Periodic::$1 " '$1 == k {print $2; exit}'
+}
+
+# True if a dnf/yum automatic.conf sets apply_updates to a truthy value.
+automatic_conf_applies_updates() {
+    local v
+    v=$(awk -F= '/^[[:space:]]*apply_updates[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print tolower($2); exit}' "$1" 2>/dev/null)
+    [[ "$v" == "yes" || "$v" == "true" || "$v" == "1" ]]
+}
+
+# Are automatic security updates actually ENABLED - not merely installed?
+#   apt:    unattended-upgrades installed AND APT::Periodic::Update-Package-Lists
+#           and ::Unattended-Upgrade above 0 ("0 disables the action").
+#   dnf:    an install timer, or the default timer with apply_updates = yes
+#           (the default timer only downloads).
+# Other package managers have no reliable test, so the result is INFO.
 check_auto_updates() {
     should_run_check "updates" || return 0
 
-    local auto_updates=false
-    local update_tool=""
-
     case "${OS_INFO[pkg_manager]}" in
         apt)
-            if pkg_installed unattended-upgrades; then
-                auto_updates=true
-                update_tool="unattended-upgrades"
+            if ! pkg_installed unattended-upgrades; then
+                check_security "Automatic Updates" "WARN" "unattended-upgrades is not installed" \
+                    "Run 'apt install unattended-upgrades && dpkg-reconfigure -plow unattended-upgrades'"
+                return 0
+            fi
+            local lists upgrade
+            lists=$(apt_periodic_value "Update-Package-Lists")
+            upgrade=$(apt_periodic_value "Unattended-Upgrade")
+            if is_numeric "$lists" && is_numeric "$upgrade" && [[ $lists -gt 0 && $upgrade -gt 0 ]]; then
+                check_security "Automatic Updates" "PASS" "Automatic security updates are enabled (unattended-upgrades)" ""
+            else
+                check_security "Automatic Updates" "WARN" \
+                    "unattended-upgrades is installed but disabled (Update-Package-Lists=${lists:-unset}, Unattended-Upgrade=${upgrade:-unset})" \
+                    "Run 'dpkg-reconfigure -plow unattended-upgrades', or set both values to \"1\" in /etc/apt/apt.conf.d/20auto-upgrades"
             fi
             ;;
-        dnf)
-            if pkg_installed dnf-automatic; then
-                if service_is_active dnf-automatic.timer 2>/dev/null; then
-                    auto_updates=true
-                    update_tool="dnf-automatic"
-                fi
-            fi
-            ;;
-        yum)
-            if pkg_installed yum-cron; then
-                if service_is_active yum-cron 2>/dev/null; then
-                    auto_updates=true
-                    update_tool="yum-cron"
-                fi
+        dnf | yum)
+            local unit installing="" downloading=""
+            for unit in dnf-automatic-install.timer dnf5-automatic-install.timer; do
+                service_is_active "$unit" 2>/dev/null && installing="$unit"
+            done
+            for unit in dnf-automatic.timer dnf5-automatic.timer yum-cron; do
+                service_is_active "$unit" 2>/dev/null && downloading="$unit"
+            done
+            local conf="$DNF_AUTOMATIC_CONF"
+            [[ "$downloading" == "yum-cron" ]] && conf="/etc/yum/yum-cron.conf"
+            if [[ -n "$installing" ]] || { [[ -n "$downloading" ]] && automatic_conf_applies_updates "$conf"; }; then
+                check_security "Automatic Updates" "PASS" "Automatic updates are enabled (${installing:-$downloading})" ""
+            elif [[ -n "$downloading" ]]; then
+                check_security "Automatic Updates" "WARN" \
+                    "${downloading} is running but does not install updates (apply_updates is not yes)" \
+                    "Set 'apply_updates = yes' in $conf, or enable dnf-automatic-install.timer"
+            else
+                check_security "Automatic Updates" "WARN" "Automatic updates are not enabled" \
+                    "Run 'dnf install dnf-automatic && systemctl enable --now dnf-automatic-install.timer'"
             fi
             ;;
         *)
-            check_security "Unattended Upgrades" "WARN" "Cannot check auto-updates for ${OS_INFO[pkg_manager]}" ""
-            return
+            check_security "Automatic Updates" "INFO" \
+                "Automatic updates cannot be detected for ${OS_INFO[pkg_manager]}" ""
             ;;
     esac
-
-    if [[ "$auto_updates" == "true" ]]; then
-        check_security "Unattended Upgrades" "PASS" "Automatic security updates configured ($update_tool)" ""
-    else
-        check_security "Unattended Upgrades" "WARN" "Automatic security updates not configured" \
-            "Install and configure automatic security updates"
-    fi
 }
 
 # =============================================================================
@@ -2059,6 +2167,27 @@ check_system_updates() {
 
     show_progress "Checking for system updates"
 
+    # apt answers from its local index. An empty or old index makes "0 updates"
+    # meaningless, so look at it before trusting the count.
+    local index_note=""
+    if [[ "${OS_INFO[pkg_manager]}" == "apt" ]]; then
+        local lists
+        lists=$(find "$APT_LISTS_DIR" -maxdepth 1 -name '*Packages*' 2>/dev/null | count_lines)
+        if [[ "$lists" -eq 0 ]]; then
+            clear_progress
+            check_security "System Updates" "WARN" \
+                "The package index is empty, so pending updates cannot be determined" \
+                "Run 'apt update' and re-run the audit"
+            return 0
+        fi
+        local mtime age_days
+        mtime=$(sanitize_int "$(portable_stat mtime "$APT_UPDATE_STAMP")")
+        if [[ $mtime -gt 0 ]]; then
+            age_days=$(( ($(date +%s) - mtime) / 86400 ))
+            [[ $age_days -gt 7 ]] && index_note=" (package index is ${age_days} days old; run 'apt update' for current data)"
+        fi
+    fi
+
     local total_updates
     local security_updates
 
@@ -2069,18 +2198,22 @@ check_system_updates() {
 
     if ! is_numeric "$total_updates"; then
         check_security "System Updates" "WARN" "Unable to determine update status" \
-            "Check package manager manually"
+            "Check the package manager manually"
         return
     fi
 
     if [[ $total_updates -eq 0 ]]; then
-        check_security "System Updates" "PASS" "All packages are up to date" ""
+        if [[ -n "$index_note" ]]; then
+            check_security "System Updates" "WARN" "No updates pending${index_note}" "Run 'apt update' and re-run the audit"
+        else
+            check_security "System Updates" "PASS" "All packages are up to date" ""
+        fi
     elif is_numeric "$security_updates" && [[ $security_updates -gt 0 ]]; then
-        check_security "System Updates" "FAIL" "$security_updates security updates available (${total_updates} total)" \
-            "Run system updates immediately" "true"
+        check_security "System Updates" "FAIL" "$security_updates security updates available (${total_updates} total)${index_note}" \
+            "Install updates now (apt upgrade / dnf upgrade) and reboot if a kernel or libc was updated"
     else
-        check_security "System Updates" "WARN" "$total_updates updates available" \
-            "Schedule system updates soon"
+        check_security "System Updates" "WARN" "$total_updates updates available${index_note}" \
+            "Install updates soon"
     fi
 }
 
@@ -2157,6 +2290,10 @@ check_failed_logins() {
 # RUNNING SERVICES CHECK
 # =============================================================================
 
+# Running Services Check. A count has no pass/fail threshold (a Docker or web
+# host legitimately runs dozens), so it is reported as INFO. Zero means the
+# service manager is not reporting - a container, or an init system we cannot
+# query - and is reported as such rather than as "minimal attack surface".
 check_running_services() {
     should_run_check "services" || return 0
 
@@ -2168,25 +2305,14 @@ check_running_services() {
         return
     fi
 
-    # A booted server always runs at least one service (the SSH daemon you are
-    # connected through, for a start). Zero means the service manager is not
-    # reporting them - a container, or an init system we cannot query - so the
-    # honest verdict is "cannot assess", not "minimal attack surface".
     if [[ $service_count -eq 0 ]]; then
         check_security "Running Services" "WARN" \
             "No running services were reported by the service manager (${OS_INFO[service_manager]}); cannot assess" ""
         return
     fi
 
-    if [[ $service_count -lt ${THRESHOLDS[services_warn]} ]]; then
-        check_security "Running Services" "PASS" "Running $service_count services - minimal attack surface" ""
-    elif [[ $service_count -lt ${THRESHOLDS[services_fail]} ]]; then
-        check_security "Running Services" "WARN" "$service_count services running" \
-            "Review and disable unnecessary services"
-    else
-        check_security "Running Services" "FAIL" "Too many services running ($service_count)" \
-            "Disable unnecessary services to reduce attack surface"
-    fi
+    check_security "Running Services" "INFO" "$service_count services are running" \
+        "Review them ('systemctl list-units --type=service --state=running') and disable what you do not use"
 }
 
 # =============================================================================
@@ -2363,20 +2489,18 @@ check_memory_usage() {
     fi
 }
 
+# CPU Usage. A one-second /proc/stat sample is a snapshot, not a verdict: it is
+# shown for context and never scored.
 check_cpu_usage() {
     should_run_check "resources" || return 0
 
-    # Get CPU usage from /proc/stat (more reliable than top)
     local cpu_usage=0
 
     if [[ -f /proc/stat ]]; then
-        # Read CPU stats twice with a small delay for accurate measurement.
-        # /proc/stat fields: cpu user nice system idle iowait irq softirq steal ...
-        # active = user+nice+system+irq+softirq+steal (fields 2,3,4,7,8,9)
-        # idle   = idle+iowait                        (fields 5,6)
-        # Sample /proc/stat twice with a 1-second gap. A full second (rather than
-        # a fractional sleep, which some BusyBox builds do not support) keeps the
-        # two samples distinct so the deltas below are meaningful.
+        # /proc/stat fields: cpu user nice system idle iowait irq softirq steal
+        # active = user+nice+system+irq+softirq+steal (2,3,4,7,8,9); idle = idle+iowait (5,6)
+        # A whole second (not a fractional sleep, which some BusyBox builds lack)
+        # keeps the two samples distinct.
         local cpu1 cpu2
         cpu1=$(head -1 /proc/stat | awk '{print $2+$3+$4+$7+$8+$9, $5+$6}')
         sleep 1
@@ -2389,75 +2513,46 @@ check_cpu_usage() {
         local active_diff=$((active2 - active1))
         local idle_diff=$((idle2 - idle1))
         local total_diff=$((active_diff + idle_diff))
-
         if [[ $total_diff -gt 0 ]]; then
             cpu_usage=$((active_diff * 100 / total_diff))
         fi
-    else
-        # Fallback to top
-        cpu_usage=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print int($2)}')
-    fi
-
-    if ! is_numeric "$cpu_usage"; then
-        check_security "CPU Usage" "WARN" "Unable to determine CPU usage" ""
-        return
     fi
 
     local cpu_cores load_avg
-    cpu_cores=$(get_cpu_cores || echo 1)
+    cpu_cores=$(get_cpu_cores || echo "?")
     load_avg=$(get_load_average 1min)
-
-    local message="${cpu_usage}% used (Cores: ${cpu_cores}, Load: ${load_avg:-?})"
-
-    if [[ $cpu_usage -lt ${THRESHOLDS[cpu_warn]} ]]; then
-        check_security "CPU Usage" "PASS" "Healthy CPU usage - $message" ""
-    elif [[ $cpu_usage -lt ${THRESHOLDS[cpu_fail]} ]]; then
-        check_security "CPU Usage" "WARN" "Moderate CPU usage - $message" \
-            "Monitor CPU usage for sustained high utilization"
-    else
-        check_security "CPU Usage" "FAIL" "Critical CPU usage - $message" \
-            "Investigate CPU-intensive processes"
-    fi
+    check_security "CPU Usage" "INFO" "${cpu_usage}% busy over 1 second (Cores: ${cpu_cores}, Load: ${load_avg:-?})" ""
 }
 
 # =============================================================================
 # SUDO LOGGING CHECK
 # =============================================================================
 
+# Sudo Logging Check. sudo logs to syslog (the journal on systemd hosts) unless
+# told otherwise, so only an explicit opt-out is a finding.
 check_sudo_logging() {
     should_run_check "sudo" || return 0
 
-    local logging_enabled=false
-    local sudoers_files=("/etc/sudoers")
-
-    # Add sudoers.d files
-    if [[ -d /etc/sudoers.d ]]; then
-        while IFS= read -r -d '' file; do
-            sudoers_files+=("$file")
-        done < <(find /etc/sudoers.d -type f -print0 2>/dev/null)
+    local -a files=("$SUDOERS_FILE" "$SUDOERS_RS")
+    local f
+    if [[ -d "$SUDOERS_DIR" ]]; then
+        while IFS= read -r f; do
+            files+=("$f")
+        done < <(find "$SUDOERS_DIR" -maxdepth 1 -type f 2>/dev/null)
     fi
 
-    # Check each file for logging configuration
-    for sudoers_file in "${sudoers_files[@]}"; do
-        if [[ -r "$sudoers_file" ]]; then
-            if grep -qE "^Defaults[[:space:]]+(log|syslog)" "$sudoers_file" 2>/dev/null; then
-                logging_enabled=true
-                log_debug "Sudo logging found in: $sudoers_file"
-                break
-            fi
-        fi
+    local disabled=false logged_elsewhere=false
+    for f in "${files[@]}"; do
+        [[ -r "$f" ]] || continue
+        grep -qE '^Defaults[[:space:]]+(.*,)?!syslog' "$f" 2>/dev/null && disabled=true
+        grep -qE '^Defaults[[:space:]].*(logfile|log_output|log_input)' "$f" 2>/dev/null && logged_elsewhere=true
     done
 
-    # On systemd systems, sudo logs to journal by default
-    if [[ "${OS_INFO[service_manager]}" == "systemd" ]]; then
-        logging_enabled=true
-    fi
-
-    if [[ "$logging_enabled" == "true" ]]; then
-        check_security "Sudo Logging" "PASS" "Sudo commands are being logged" ""
+    if [[ "$disabled" == "true" && "$logged_elsewhere" == "false" ]]; then
+        check_security "Sudo Logging" "WARN" "sudo logging to syslog is explicitly disabled" \
+            "Remove 'Defaults !syslog' from sudoers, or add 'Defaults logfile=/var/log/sudo.log'"
     else
-        check_security "Sudo Logging" "WARN" "Sudo logging not explicitly configured" \
-            "Add 'Defaults logfile=/var/log/sudo.log' to /etc/sudoers"
+        check_security "Sudo Logging" "PASS" "sudo commands are logged" ""
     fi
 }
 
@@ -2991,50 +3086,44 @@ check_world_writable() {
     fi
 }
 
-# Time Synchronization Check
+# Time Synchronization Check. "The NTP service is enabled" is not "the clock is
+# synchronised" (systemd's NTPSynchronized property is the kernel's answer), so
+# ask that first and use service detection only when it is unavailable.
 check_time_sync() {
     should_run_check "time" || return 0
 
-    local ntp_active=false
-    local ntp_service=""
-
-    # Check systemd-timesyncd
-    if service_is_active systemd-timesyncd 2>/dev/null; then
-        ntp_active=true
-        ntp_service="systemd-timesyncd"
+    local sync="" ntp_enabled=""
+    if has_command timedatectl; then
+        sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null)
+        ntp_enabled=$(timedatectl show --property=NTP --value 2>/dev/null)
     fi
 
-    # Check chronyd
-    if [[ "$ntp_active" == "false" ]] && service_is_active chronyd 2>/dev/null; then
-        ntp_active=true
-        ntp_service="chronyd"
-    fi
-
-    # Check ntpd
-    if [[ "$ntp_active" == "false" ]]; then
-        if service_is_active ntpd 2>/dev/null || service_is_active ntp 2>/dev/null; then
-            ntp_active=true
-            ntp_service="ntpd"
+    local svc active=""
+    for svc in systemd-timesyncd chrony chronyd ntp ntpd ntpsec openntpd; do
+        if service_is_active "$svc" 2>/dev/null; then
+            active="$svc"
+            break
         fi
-    fi
+    done
 
-    # Check timedatectl status
-    if [[ "$ntp_active" == "false" ]] && command -v timedatectl &>/dev/null; then
-        if timedatectl show --property=NTP --value 2>/dev/null | grep -qi "yes"; then
-            ntp_active=true
-            ntp_service="timedatectl"
-        fi
-    fi
-
-    if [[ "$ntp_active" == "true" ]]; then
-        check_security "Time Sync" "PASS" "Time synchronization active ($ntp_service)" ""
+    if [[ "$sync" == "yes" ]]; then
+        check_security "Time Sync" "PASS" "The clock is synchronised${active:+ ($active)}" ""
+    elif [[ "$sync" == "no" && ( -n "$active" || "$ntp_enabled" == "yes" ) ]]; then
+        check_security "Time Sync" "WARN" "${active:-NTP} is enabled but the clock is not synchronised" \
+            "Check the time service ('timedatectl status', 'chronyc tracking') and that outbound NTP (UDP 123) is allowed"
+    elif [[ -n "$active" ]]; then
+        check_security "Time Sync" "PASS" "Time synchronization service is active ($active)" ""
+    elif [[ "$ntp_enabled" == "yes" ]]; then
+        check_security "Time Sync" "PASS" "Time synchronization is enabled (timedatectl)" ""
     else
         check_security "Time Sync" "WARN" "No time synchronization detected" \
-            "Configure time synchronization (chronyd, ntpd, or systemd-timesyncd)"
+            "Install and enable chrony ('apt install chrony') or systemd-timesyncd"
     fi
 }
 
-# Audit System Check
+# Audit System Check. auditd is valuable but is a Level 2 control (CIS) and
+# heavy on small servers: absent is INFO; installed but stopped, or running
+# without rules, is a real gap.
 check_audit_system() {
     should_run_check "audit" || return 0
 
@@ -3044,20 +3133,19 @@ check_audit_system() {
             if command -v auditctl &>/dev/null; then
                 rule_count=$(auditctl -l 2>/dev/null | grep -c "^-" || true)
             fi
-
             if [[ $rule_count -gt 0 ]]; then
-                check_security "Audit System" "PASS" "auditd active with $rule_count rules" ""
+                check_security "Audit System" "PASS" "auditd is running with $rule_count rules" ""
             else
-                check_security "Audit System" "WARN" "auditd running but no rules configured" \
-                    "Configure audit rules for security monitoring"
+                check_security "Audit System" "WARN" "auditd is running but has no rules" \
+                    "Add audit rules (e.g. copy /usr/share/doc/auditd/examples/rules/ to /etc/audit/rules.d/)"
             fi
         else
-            check_security "Audit System" "WARN" "auditd installed but not running" \
-                "Start and enable auditd service"
+            check_security "Audit System" "WARN" "auditd is installed but not running" \
+                "Start and enable auditd ('systemctl enable --now auditd')"
         fi
     else
-        check_security "Audit System" "WARN" "Audit daemon (auditd) not installed" \
-            "Install auditd for security auditing"
+        check_security "Audit System" "INFO" "auditd is not installed" \
+            "Optional: install auditd for a security audit trail ('apt install auditd')"
     fi
 }
 
@@ -3216,21 +3304,25 @@ check_sgid_files() {
     fi
 }
 
-# Cron Security Check
+# Cron Security Check. Cron can run anything as its owner, so who may use it
+# matters: CIS wants /etc/cron.allow to exist (and cron.deny not to). An EMPTY
+# cron.deny - what AlmaLinux and Rocky ship - restricts nobody.
 check_cron_security() {
     should_run_check "cron" || return 0
 
-    local issues=()
-
-    # Check cron.allow and cron.deny
-    if [[ ! -f /etc/cron.allow ]] && [[ ! -f /etc/cron.deny ]]; then
-        issues+=("No cron access control (cron.allow/cron.deny)")
+    if ! has_command crontab; then
+        check_security "Cron Security" "INFO" "Cron is not installed" ""
+        return 0
     fi
 
-    # Check crontab directory permissions
+    local -a issues=()
+    local restricted=false
+    [[ -f "$CRON_ALLOW" ]] && restricted=true
+    [[ -s "$CRON_DENY" ]] && restricted=true
+
+    local crondir perms
     for crondir in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly; do
         if [[ -d "$crondir" ]]; then
-            local perms
             perms=$(portable_stat mode "$crondir")
             if [[ -n "$perms" ]] && [[ "${perms: -1}" =~ [2367] ]]; then
                 issues+=("$crondir is world-writable")
@@ -3238,83 +3330,84 @@ check_cron_security() {
         fi
     done
 
-    # Check for world-readable crontabs with sensitive content
     if [[ -d /var/spool/cron/crontabs ]]; then
-        local perms
         perms=$(portable_stat mode /var/spool/cron/crontabs)
         if [[ -n "$perms" ]] && [[ "$perms" != "700" ]] && [[ "$perms" != "1730" ]]; then
             issues+=("/var/spool/cron/crontabs has weak permissions: $perms")
         fi
     fi
 
-    if [[ ${#issues[@]} -eq 0 ]]; then
-        check_security "Cron Security" "PASS" "Cron configuration is secure" ""
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        local msg
+        msg=$(printf '%s; ' "${issues[@]}")
+        check_security "Cron Security" "WARN" "${msg%; }" \
+            "Fix the permissions: 'chmod o-w' on the cron directories, 'chmod 700 /var/spool/cron/crontabs'"
+    elif [[ "$restricted" == "false" ]]; then
+        check_security "Cron Security" "INFO" "Any user may use cron (no /etc/cron.allow, and cron.deny is absent or empty)" \
+            "Optional: create /etc/cron.allow listing only the accounts that need cron ('echo root > /etc/cron.allow')"
     else
-        check_security "Cron Security" "WARN" "Found ${#issues[@]} cron security issues" \
-            "Review cron permissions and access controls"
+        check_security "Cron Security" "PASS" "Cron access is restricted and permissions are sound" ""
     fi
 }
 
-# Dangerous Network Protocols Check
+# Dangerous Network Protocols Check. dccp, sctp, rds and tipc are rarely needed
+# and have a history of kernel flaws (CIS Level 2): loading one is a WARN,
+# merely not blacklisting them is INFO.
 check_dangerous_protocols() {
     should_run_check "kernel" || return 0
 
     local dangerous_protocols=("dccp" "sctp" "rds" "tipc")
-    local loaded_dangerous=()
-
+    local loaded=() proto
     for proto in "${dangerous_protocols[@]}"; do
         if lsmod 2>/dev/null | grep -q "^$proto"; then
-            loaded_dangerous+=("$proto")
+            loaded+=("$proto")
         fi
     done
 
-    # Check if protocols are blacklisted
     local blacklisted=0
     for proto in "${dangerous_protocols[@]}"; do
-        if grep -rq "install $proto /bin/true\|install $proto /bin/false\|blacklist $proto" /etc/modprobe.d/ 2>/dev/null; then
+        if grep -rqE "install $proto /bin/(true|false)|blacklist $proto" "$MODPROBE_DIR" 2>/dev/null; then
             ((blacklisted++)) || true
         fi
     done
 
-    if [[ ${#loaded_dangerous[@]} -gt 0 ]]; then
-        check_security "Network Protocols" "WARN" "Dangerous protocols loaded: ${loaded_dangerous[*]}" \
-            "Blacklist unnecessary protocols in /etc/modprobe.d/"
+    if [[ ${#loaded[@]} -gt 0 ]]; then
+        check_security "Network Protocols" "WARN" "Rarely needed protocols are loaded: ${loaded[*]}" \
+            "Blacklist what you do not use: 'install ${loaded[0]} /bin/true' in /etc/modprobe.d/blacklist.conf"
     elif [[ $blacklisted -lt ${#dangerous_protocols[@]} ]]; then
-        check_security "Network Protocols" "WARN" "Some dangerous protocols not explicitly disabled" \
-            "Add 'install <protocol> /bin/true' to /etc/modprobe.d/blacklist.conf"
+        check_security "Network Protocols" "INFO" "Not loaded, but not blacklisted: ${dangerous_protocols[*]}" \
+            "Optional: add 'install <protocol> /bin/true' to /etc/modprobe.d/blacklist.conf"
     else
-        check_security "Network Protocols" "PASS" "Dangerous protocols are disabled" ""
+        check_security "Network Protocols" "PASS" "Rarely needed network protocols are disabled" ""
     fi
 }
 
-# Login Banner Check
+# Login Banner Check. A warning banner is a legal/policy measure, not a
+# technical defence, so its absence is INFO. The stock /etc/issue of every
+# distribution only names the OS and kernel (with getty escapes such as \n \l
+# \S \r \m), so "has text" cannot tell it apart from a real banner; a real
+# banner says who may use the system or that use is monitored.
 check_login_banner() {
     should_run_check "system" || return 0
 
     local has_banner=false
+    local banner_words='authori[sz]ed|unauthori[sz]ed|monitor|prohibit|permitted|restricted|private system|legal|consent|prosecut|warning|notice'
 
-    # Check SSH banner
     local ssh_banner
     ssh_banner=$(get_ssh_config "Banner" "none")
-    if [[ "$ssh_banner" != "none" ]] && [[ -f "$ssh_banner" ]]; then
+    if [[ "$ssh_banner" != "none" && -s "$ssh_banner" ]]; then
         has_banner=true
     fi
 
-    # Check /etc/issue and /etc/issue.net
-    if [[ -f /etc/issue ]] && [[ -s /etc/issue ]]; then
-        local issue_content
-        issue_content=$(< /etc/issue)
-        # Check it's not just default content (OS name or \n/\l escape sequences)
-        if [[ ! "$issue_content" =~ (Ubuntu|Debian|CentOS|Red\ Hat|\\\\n|\\\\l) ]]; then
-            has_banner=true
-        fi
+    if [[ -s "$ISSUE_FILE" ]] && grep -qiE "$banner_words" "$ISSUE_FILE" 2>/dev/null; then
+        has_banner=true
     fi
 
     if [[ "$has_banner" == "true" ]]; then
-        check_security "Login Banner" "PASS" "Login warning banner is configured" ""
+        check_security "Login Banner" "PASS" "A login warning banner is configured" ""
     else
-        check_security "Login Banner" "WARN" "No login warning banner configured" \
-            "Configure a warning banner in /etc/issue and SSH Banner directive"
+        check_security "Login Banner" "INFO" "No login warning banner is configured" \
+            "Optional: add a usage notice to /etc/issue.net and set 'Banner /etc/issue.net' in sshd_config"
     fi
 }
 
@@ -3421,72 +3514,50 @@ check_log_permissions() {
     fi
 }
 
-# Secure Boot / UEFI Check
+# Secure Boot / Bootloader Check. Informational: most VPS platforms cannot
+# enable Secure Boot, and a GRUB password is bypassed by the hypervisor console.
 check_secure_boot() {
     should_run_check "system" || return 0
 
-    local secure_boot_status="unknown"
-
-    # Check if running UEFI
-    if [[ -d /sys/firmware/efi ]]; then
-        # Check SecureBoot status
-        local sb_file
-        for sb_file in /sys/firmware/efi/efivars/SecureBoot-*; do
+    if [[ -d "$EFI_DIR" ]]; then
+        local status="unknown" sb_file sb_value
+        for sb_file in "$EFI_DIR"/efivars/SecureBoot-*; do
             if [[ -f "$sb_file" ]]; then
-                local sb_value
                 sb_value=$(od -An -t u1 "$sb_file" 2>/dev/null | awk '{print $NF}')
-                if [[ "$sb_value" == "1" ]]; then
-                    secure_boot_status="enabled"
-                else
-                    secure_boot_status="disabled"
-                fi
+                [[ "$sb_value" == "1" ]] && status="enabled" || status="disabled"
                 break
             fi
         done
-
-        # Alternative check via mokutil
-        if command -v mokutil &>/dev/null; then
-            if mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot enabled"; then
-                secure_boot_status="enabled"
-            fi
+        if command -v mokutil &>/dev/null && mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot enabled"; then
+            status="enabled"
         fi
-
-        if [[ "$secure_boot_status" == "enabled" ]]; then
-            check_security "Secure Boot" "PASS" "UEFI Secure Boot is enabled" ""
-        elif [[ "$secure_boot_status" == "disabled" ]]; then
-            check_security "Secure Boot" "WARN" "UEFI Secure Boot is disabled" \
-                "Consider enabling Secure Boot for enhanced boot security"
+        case "$status" in
+            enabled) check_security "Secure Boot" "PASS" "UEFI Secure Boot is enabled" "" ;;
+            disabled) check_security "Secure Boot" "INFO" "UEFI Secure Boot is disabled" \
+                "Optional: enable Secure Boot if your provider supports it" ;;
+            *) check_security "Secure Boot" "INFO" "Secure Boot status could not be determined" "" ;;
+        esac
+    elif [[ -f /boot/grub/grub.cfg || -f /boot/grub2/grub.cfg ]]; then
+        if grep -qE "password|set superusers" /etc/grub.d/* 2>/dev/null; then
+            check_security "Bootloader Security" "PASS" "A GRUB password is configured" ""
         else
-            check_security "Secure Boot" "WARN" "Unable to determine Secure Boot status" ""
-        fi
-    else
-        # Legacy BIOS - check for GRUB password
-        if [[ -f /boot/grub/grub.cfg ]] || [[ -f /boot/grub2/grub.cfg ]]; then
-            if grep -q "password" /etc/grub.d/* 2>/dev/null || \
-               grep -q "set superusers" /etc/grub.d/* 2>/dev/null; then
-                check_security "Bootloader Security" "PASS" "GRUB password is configured" ""
-            else
-                check_security "Bootloader Security" "WARN" "GRUB password not configured" \
-                    "Configure GRUB password to prevent unauthorized boot modifications"
-            fi
+            check_security "Bootloader Security" "INFO" "No GRUB password is configured" \
+                "Optional: set a GRUB password (only meaningful if others can reach the console)"
         fi
     fi
 }
 
-# Process Accounting Check
+# Process Accounting Check. Optional command auditing; not a baseline control.
 check_process_accounting() {
     should_run_check "audit" || return 0
 
     local accounting_enabled=false
 
-    # Check for psacct/acct
     if pkg_installed psacct || pkg_installed acct; then
         if service_is_active psacct 2>/dev/null || service_is_active acct 2>/dev/null; then
             accounting_enabled=true
         fi
     fi
-
-    # Check if lastcomm works (indicates accounting is on)
     if command -v lastcomm &>/dev/null && lastcomm 2>/dev/null | head -1 | grep -q .; then
         accounting_enabled=true
     fi
@@ -3494,8 +3565,8 @@ check_process_accounting() {
     if [[ "$accounting_enabled" == "true" ]]; then
         check_security "Process Accounting" "PASS" "Process accounting is enabled" ""
     else
-        check_security "Process Accounting" "WARN" "Process accounting not enabled" \
-            "Install and enable psacct/acct for command auditing"
+        check_security "Process Accounting" "INFO" "Process accounting is not enabled" \
+            "Optional: install and enable psacct/acct to record every command run"
     fi
 }
 
@@ -3566,43 +3637,41 @@ check_wireless_interfaces() {
     fi
 }
 
-# USB Storage Restriction Check
+# USB Storage Restriction Check. A virtual server has no USB bus, so there is
+# nothing to restrict; on hardware it is optional hardening.
 check_usb_storage() {
     should_run_check "system" || return 0
 
-    local usb_disabled=false
-
-    # Check if usb-storage module is blacklisted
-    if grep -rq "blacklist usb-storage\|install usb-storage /bin/true\|install usb-storage /bin/false" /etc/modprobe.d/ 2>/dev/null; then
-        usb_disabled=true
+    if [[ ! -d "$USB_BUS_DIR" ]]; then
+        check_security "USB Storage" "PASS" "No USB bus present (virtual server)" ""
+        return 0
     fi
 
-    # Check if usb-storage is currently loaded
-    local usb_loaded=false
+    local usb_disabled=false usb_loaded=false
+    if grep -rqE "blacklist usb-storage|install usb-storage /bin/(true|false)" "$MODPROBE_DIR" 2>/dev/null; then
+        usb_disabled=true
+    fi
     if lsmod 2>/dev/null | grep -q "usb_storage"; then
         usb_loaded=true
     fi
 
-    if [[ "$usb_disabled" == "true" ]] && [[ "$usb_loaded" == "false" ]]; then
+    if [[ "$usb_disabled" == "true" && "$usb_loaded" == "false" ]]; then
         check_security "USB Storage" "PASS" "USB storage is disabled" ""
-    elif [[ "$usb_loaded" == "true" ]]; then
-        check_security "USB Storage" "WARN" "USB storage module is loaded" \
-            "Consider disabling USB storage on production servers"
     else
-        check_security "USB Storage" "WARN" "USB storage not explicitly disabled" \
-            "Add 'blacklist usb-storage' to /etc/modprobe.d/blacklist.conf"
+        check_security "USB Storage" "INFO" "USB storage is not restricted" \
+            "Optional on hardware: add 'blacklist usb-storage' to /etc/modprobe.d/blacklist.conf"
     fi
 }
 
-# Compiler Access Check (production servers shouldn't have compilers)
+# Compiler Access Check. Build toolchains on a production server make
+# post-exploitation easier, but plenty of servers build things: INFO, not a failure.
 check_compiler_access() {
     should_run_check "system" || return 0
 
     # Only real compilers. Deliberately excludes `as`/`ld` (binutils, present on
-    # almost every system for routine linking) and `make` (a build tool, not a
-    # compiler) - including them made this check fire on virtually every host.
+    # almost every system) and `make` (a build tool, not a compiler).
     local compilers=("gcc" "g++" "cc" "clang" "tcc")
-    local found_compilers=()
+    local found_compilers=() compiler
 
     for compiler in "${compilers[@]}"; do
         if command -v "$compiler" &>/dev/null; then
@@ -3611,10 +3680,10 @@ check_compiler_access() {
     done
 
     if [[ ${#found_compilers[@]} -eq 0 ]]; then
-        check_security "Compiler Access" "PASS" "No compilers found (good for production)" ""
+        check_security "Compiler Access" "PASS" "No compilers installed" ""
     else
-        check_security "Compiler Access" "WARN" "Compiler(s) available: ${found_compilers[*]}" \
-            "On a production server, consider removing build toolchains to reduce attack surface"
+        check_security "Compiler Access" "INFO" "Compiler(s) installed: ${found_compilers[*]}" \
+            "Optional: remove build toolchains from a production server you do not build on"
     fi
 }
 
@@ -3649,154 +3718,132 @@ get_public_ip() {
 # ADVANCED SECURITY CHECKS
 # =============================================================================
 
-# Extended SSH Hardening Check
-# Covers: X11Forwarding, MaxAuthTries, idle timeout, PermitEmptyPasswords,
-#         AllowUsers/AllowGroups restrictions, weak cipher detection,
-#         PubkeyAuthentication
+# Extended SSH hardening. Only settings whose value can actually be wrong are
+# scored: awarding a point for each setting that merely sits at a safe default
+# made a stock sshd_config look "poorly hardened". Optional extras (X11, idle
+# timeout, AllowUsers) are reported separately as INFO.
 check_ssh_hardening_extended() {
     should_run_check "ssh" || return 0
 
-    local issues=()
-    local score=0
-    local max_score=7
+    local -a issues=() fixes=() hints=()
+    local failed=false
 
-    # X11Forwarding should be disabled (unnecessary attack surface)
-    local x11_forward
-    x11_forward=$(get_ssh_config "X11Forwarding" "yes")
-    if [[ "$x11_forward" == "no" ]]; then
-        ((score++)) || true
-    else
-        issues+=("X11Forwarding not disabled")
-    fi
-
-    # MaxAuthTries <= 3 limits per-connection brute-force attempts
-    local max_tries
-    max_tries=$(get_ssh_config "MaxAuthTries" "6")
-    if is_numeric "$max_tries" && [[ $max_tries -le 3 ]]; then
-        ((score++)) || true
-    else
-        issues+=("MaxAuthTries=${max_tries:-6} (should be <=3)")
-    fi
-
-    # ClientAliveInterval enforces idle session timeout
-    local alive_interval
-    alive_interval=$(get_ssh_config "ClientAliveInterval" "0")
-    if is_numeric "$alive_interval" && [[ $alive_interval -gt 0 ]] && [[ $alive_interval -le 300 ]]; then
-        ((score++)) || true
-    else
-        issues+=("No idle timeout (ClientAliveInterval=${alive_interval:-0}; should be 1-300)")
-    fi
-
-    # PermitEmptyPasswords must be no
+    # Accounts with an empty password must never be able to log in over SSH.
     local permit_empty
     permit_empty=$(get_ssh_config "PermitEmptyPasswords" "no")
-    if [[ "$permit_empty" == "no" ]]; then
-        ((score++)) || true
-    else
-        issues+=("PermitEmptyPasswords is enabled")
+    if [[ "$permit_empty" == "yes" ]]; then
+        issues+=("PermitEmptyPasswords is yes")
+        fixes+=("PermitEmptyPasswords no")
+        failed=true
     fi
 
-    # AllowUsers or AllowGroups restricts which accounts can SSH
-    local allow_users allow_groups
-    allow_users=$(get_ssh_config "AllowUsers" "")
-    allow_groups=$(get_ssh_config "AllowGroups" "")
-    if [[ -n "$allow_users" ]] || [[ -n "$allow_groups" ]]; then
-        ((score++)) || true
-    else
-        issues+=("No AllowUsers/AllowGroups restriction (all accounts can SSH)")
+    # Explicitly enabled legacy ciphers (the default list contains none).
+    local ciphers weak_cipher found=""
+    ciphers=$(get_ssh_config "Ciphers" "")
+    for weak_cipher in arcfour 3des-cbc blowfish-cbc cast128-cbc aes128-cbc aes192-cbc aes256-cbc; do
+        [[ ",$ciphers," == *",$weak_cipher,"* ]] && found+="${found:+, }$weak_cipher"
+    done
+    if [[ -n "$found" ]]; then
+        issues+=("weak ciphers enabled: $found")
+        fixes+=("remove $found from Ciphers")
     fi
 
-    # Explicit Ciphers config: flag known-weak algorithms
-    # (absent config means modern OpenSSH defaults, which are acceptable)
-    local ciphers_config
-    ciphers_config=$(get_ssh_config "Ciphers" "")
-    if [[ -n "$ciphers_config" ]]; then
-        local found_weak=false
-        local weak_cipher
-        for weak_cipher in arcfour 3des-cbc blowfish-cbc cast128-cbc \
-                           aes128-cbc aes192-cbc aes256-cbc; do
-            if [[ "$ciphers_config" == *"$weak_cipher"* ]]; then
-                found_weak=true
-                break
-            fi
-        done
-        if [[ "$found_weak" == "false" ]]; then
-            ((score++)) || true
-        else
-            issues+=("Weak cipher in Ciphers list: $ciphers_config")
-        fi
-    else
-        ((score++)) || true  # Default ciphers in modern OpenSSH are strong
+    local pubkey
+    pubkey=$(get_ssh_config "PubkeyAuthentication" "yes")
+    if [[ "$pubkey" != "yes" ]]; then
+        issues+=("PubkeyAuthentication is $pubkey")
+        fixes+=("PubkeyAuthentication yes")
     fi
 
-    # PubkeyAuthentication should be enabled
-    local pubkey_auth
-    pubkey_auth=$(get_ssh_config "PubkeyAuthentication" "yes")
-    if [[ "$pubkey_auth" == "yes" ]]; then
-        ((score++)) || true
-    else
-        issues+=("PubkeyAuthentication is disabled")
-    fi
-
-    if [[ $score -eq $max_score ]]; then
-        check_security "SSH Hardening" "PASS" "SSH fully hardened ($score/$max_score settings correct)" ""
-    elif [[ $score -ge $((max_score * 2 / 3)) ]]; then
-        check_security "SSH Hardening" "WARN" "SSH partially hardened ($score/$max_score): ${issues[*]}" \
-            "Harden /etc/ssh/sshd_config: ${issues[0]}"
-    else
-        check_security "SSH Hardening" "FAIL" "SSH poorly hardened ($score/$max_score correct)" \
-            "Disable X11Forwarding, set MaxAuthTries<=3, ClientAliveInterval<=300, restrict AllowUsers"
-    fi
-}
-
-# Sudoers Security Check
-# Covers: NOPASSWD entries in /etc/sudoers and /etc/sudoers.d/*,
-#         overly-permissive sudoers file permissions
-check_sudoers_security() {
-    should_run_check "sudo" || return 0
-
-    local issues=()
-
-    # Scan /etc/sudoers for NOPASSWD
-    if [[ -r /etc/sudoers ]]; then
-        local nopasswd_count
-        nopasswd_count=$(grep -v "^[[:space:]]*#" /etc/sudoers 2>/dev/null | grep -c "NOPASSWD" || true)
-        if [[ ${nopasswd_count:-0} -gt 0 ]]; then
-            local nopasswd_entries
-            nopasswd_entries=$(grep -v "^[[:space:]]*#" /etc/sudoers 2>/dev/null | \
-                               grep "NOPASSWD" | awk '{print $1}' | tr '\n' ' ')
-            issues+=("NOPASSWD in /etc/sudoers ($nopasswd_count entries, users: $nopasswd_entries)")
-        fi
-    fi
-
-    # Scan /etc/sudoers.d/* for NOPASSWD
-    if [[ -d /etc/sudoers.d ]]; then
-        while IFS= read -r sudoers_file; do
-            [[ -r "$sudoers_file" ]] || continue
-            local file_nopasswd
-            file_nopasswd=$(grep -v "^[[:space:]]*#" "$sudoers_file" 2>/dev/null | \
-                            grep -c "NOPASSWD" || true)
-            if [[ ${file_nopasswd:-0} -gt 0 ]]; then
-                issues+=("NOPASSWD in ${sudoers_file##*/} ($file_nopasswd entries)")
-            fi
-        done < <(find /etc/sudoers.d -maxdepth 1 -type f 2>/dev/null)
-    fi
-
-    # /etc/sudoers permissions should be 440 (root:root, no write anywhere)
-    if [[ -f /etc/sudoers ]]; then
-        local sudoers_perms
-        sudoers_perms=$(portable_stat mode /etc/sudoers)
-        if [[ -n "$sudoers_perms" ]] && \
-           [[ "$sudoers_perms" != "440" ]] && [[ "$sudoers_perms" != "400" ]]; then
-            issues+=("/etc/sudoers permissions: $sudoers_perms (should be 440)")
-        fi
+    # OpenSSH's default is 6; going above it only helps a guessing attacker.
+    local tries
+    tries=$(get_ssh_config "MaxAuthTries" "6")
+    if is_numeric "$tries" && [[ $tries -gt 6 ]]; then
+        issues+=("MaxAuthTries is $tries")
+        fixes+=("MaxAuthTries 4")
+    elif is_numeric "$tries" && [[ $tries -gt 4 ]]; then
+        hints+=("MaxAuthTries $tries (CIS suggests 4)")
     fi
 
     if [[ ${#issues[@]} -eq 0 ]]; then
-        check_security "Sudoers Security" "PASS" "Sudoers configuration is secure" ""
+        check_security "SSH Hardening" "PASS" "No weak SSH settings found" ""
     else
-        check_security "Sudoers Security" "WARN" "Found ${#issues[@]} sudoers issue(s): ${issues[0]}" \
-            "Remove NOPASSWD from sudoers unless strictly required; use specific commands only"
+        local msg rec
+        msg=$(printf '%s; ' "${issues[@]}")
+        rec="In /etc/ssh/sshd_config set: $(printf '%s; ' "${fixes[@]}")"
+        if [[ "$failed" == "true" ]]; then
+            check_security "SSH Hardening" "FAIL" "${msg%; }" "${rec%; }"
+        else
+            check_security "SSH Hardening" "WARN" "${msg%; }" "${rec%; }"
+        fi
+    fi
+
+    # Optional extras: useful, but not a failure on a correctly run server.
+    local x11 alive count users groups
+    x11=$(get_ssh_config "X11Forwarding" "no")
+    alive=$(get_ssh_config "ClientAliveInterval" "0")
+    count=$(get_ssh_config "ClientAliveCountMax" "3")
+    users=$(get_ssh_config "AllowUsers" "")
+    groups=$(get_ssh_config "AllowGroups" "")
+    [[ "$x11" == "yes" ]] && hints+=("X11Forwarding is on")
+    if [[ "$alive" == "0" || "$count" == "0" ]]; then
+        hints+=("no idle-session timeout (ClientAliveInterval ${alive}, ClientAliveCountMax ${count})")
+    fi
+    [[ -z "$users" && -z "$groups" ]] && hints+=("no AllowUsers/AllowGroups limit")
+    if [[ ${#hints[@]} -gt 0 ]]; then
+        local hint_msg
+        hint_msg=$(printf '%s; ' "${hints[@]}")
+        check_security "SSH Optional Hardening" "INFO" "${hint_msg%; }" \
+            "Optional: X11Forwarding no; ClientAliveInterval 300 with ClientAliveCountMax 2; AllowUsers or AllowGroups for the accounts that need SSH"
+    fi
+}
+
+# Sudoers Security Check. NOPASSWD is the default on cloud images and is
+# reasonable with key-only SSH, so it is INFO; loose permissions on the sudoers
+# file are a real problem. sudo-rs (Ubuntu 25.10+) reads /etc/sudoers-rs
+# INSTEAD of /etc/sudoers when it exists, so that file is scanned too.
+check_sudoers_security() {
+    should_run_check "sudo" || return 0
+
+    local -a files=() nopasswd=() perm_issues=()
+    local f
+    [[ -f "$SUDOERS_FILE" ]] && files+=("$SUDOERS_FILE")
+    [[ -f "$SUDOERS_RS" ]] && files+=("$SUDOERS_RS")
+    if [[ -d "$SUDOERS_DIR" ]]; then
+        while IFS= read -r f; do
+            files+=("$f")
+        done < <(find "$SUDOERS_DIR" -maxdepth 1 -type f 2>/dev/null)
+    fi
+
+    local n
+    for f in "${files[@]}"; do
+        [[ -r "$f" ]] || continue
+        n=$(grep -v '^[[:space:]]*#' "$f" 2>/dev/null | grep -c 'NOPASSWD' || true)
+        [[ ${n:-0} -gt 0 ]] && nopasswd+=("${f##*/} ($n)")
+    done
+
+    local perms
+    for f in "$SUDOERS_FILE" "$SUDOERS_RS"; do
+        [[ -f "$f" ]] || continue
+        perms=$(portable_stat mode "$f")
+        # Unsafe if group/other can write it, or anyone outside the owner and
+        # group can read it. 400, 440, 600 and 640 are all fine.
+        if [[ -n "$perms" ]] && (( (8#$perms & 8#022) != 0 || (8#$perms & 8#007) != 0 )); then
+            perm_issues+=("${f##*/} permissions are $perms (should be 440)")
+        fi
+    done
+
+    if [[ ${#perm_issues[@]} -gt 0 ]]; then
+        local msg
+        msg=$(printf '%s; ' "${perm_issues[@]}")
+        check_security "Sudoers Security" "WARN" "${msg%; }" "Run 'chmod 440 $SUDOERS_FILE'"
+    elif [[ ${#nopasswd[@]} -gt 0 ]]; then
+        local list
+        list=$(printf '%s, ' "${nopasswd[@]}")
+        check_security "Sudoers Security" "INFO" "Passwordless sudo (NOPASSWD) in: ${list%, }" \
+            "NOPASSWD is the cloud-image default and reasonable with key-only SSH. If you remove it, first set a password for the account ('passwd USER') or you will lose sudo access"
+    else
+        check_security "Sudoers Security" "PASS" "Sudoers configuration looks sound" ""
     fi
 }
 
@@ -3840,118 +3887,42 @@ check_tmp_mount_options() {
     fi
 }
 
-# File Integrity Monitoring Check
-# Covers: AIDE, Tripwire, samhain, OSSEC/Wazuh presence and freshness
+# File Integrity Monitoring Check. Presence only: an integrity database changes
+# only when it is deliberately re-initialised, so its age says nothing about
+# whether checks are being run.
 check_file_integrity_monitoring() {
     should_run_check "integrity" || return 0
 
-    local fim_installed=false
     local fim_name=""
-    local fim_recent=false
-
-    # AIDE (most common on Debian/Ubuntu/RHEL)
     if command -v aide &>/dev/null || [[ -f /etc/aide.conf ]] || [[ -f /etc/aide/aide.conf ]]; then
-        fim_installed=true
         fim_name="AIDE"
-        # Check database age: AIDE is useful only when run regularly
-        local aide_db=""
-        for db_path in /var/lib/aide/aide.db /var/lib/aide/aide.db.gz \
-                       /var/lib/aide/aide.db.new /var/lib/aide/aide.db.new.gz; do
-            [[ -f "$db_path" ]] && { aide_db="$db_path"; break; }
-        done
-        if [[ -n "$aide_db" ]]; then
-            local db_mtime db_age_days now
-            db_mtime=$(portable_stat mtime "$aide_db")
-            db_mtime=$(sanitize_int "$db_mtime")
-            now=$(date +%s 2>/dev/null || echo 0)
-            if [[ $db_mtime -gt 0 && $now -gt 0 ]]; then
-                db_age_days=$(( (now - db_mtime) / 86400 ))
-                [[ $db_age_days -le 7 ]] && fim_recent=true
-            fi
-        fi
-    fi
-
-    # Tripwire
-    if [[ "$fim_installed" == "false" ]] && \
-       { command -v tripwire &>/dev/null || [[ -f /etc/tripwire/tw.cfg ]]; }; then
-        fim_installed=true
+    elif command -v tripwire &>/dev/null || [[ -f /etc/tripwire/tw.cfg ]]; then
         fim_name="Tripwire"
-        fim_recent=true
-    fi
-
-    # samhain
-    if [[ "$fim_installed" == "false" ]] && command -v samhain &>/dev/null; then
-        fim_installed=true
+    elif command -v samhain &>/dev/null; then
         fim_name="samhain"
-        fim_recent=true
-    fi
-
-    # OSSEC / Wazuh (includes FIM)
-    if [[ "$fim_installed" == "false" ]] && \
-       { command -v ossec-control &>/dev/null || [[ -d /var/ossec ]] || [[ -d /var/wazuh-agent ]]; }; then
-        fim_installed=true
+    elif command -v ossec-control &>/dev/null || [[ -d /var/ossec ]] || [[ -d /var/wazuh-agent ]]; then
         fim_name="OSSEC/Wazuh"
-        fim_recent=true
     fi
 
-    if [[ "$fim_installed" == "false" ]]; then
-        check_security "File Integrity Monitoring" "WARN" \
-            "No file integrity monitoring tool detected" \
-            "Install AIDE: apt install aide && aideinit && cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db"
-    elif [[ "$fim_recent" == "false" ]]; then
-        check_security "File Integrity Monitoring" "WARN" \
-            "$fim_name installed but database not updated in over 7 days" \
-            "Schedule 'aide --check' in cron and update the AIDE database regularly"
+    if [[ -n "$fim_name" ]]; then
+        check_security "File Integrity Monitoring" "PASS" "File integrity monitoring is installed ($fim_name)" ""
     else
-        check_security "File Integrity Monitoring" "PASS" \
-            "File integrity monitoring active and current ($fim_name)" ""
+        check_security "File Integrity Monitoring" "INFO" "No file integrity monitoring tool is installed" \
+            "Optional: install AIDE ('apt install aide && aideinit') and schedule 'aide --check'"
     fi
 }
 
-# Rootkit Detection Tools Check
-# Covers: rkhunter and chkrootkit installation and recency
+# Rootkit Scanner Check. Informational only: these scanners are signature-based
+# and rarely updated, so a missing one is not a finding.
 check_rootkit_detection() {
     should_run_check "integrity" || return 0
 
-    local rk_installed=false
-    local rk_name=""
-    local rk_recent=false
-
-    # rkhunter is the most widely deployed rootkit scanner
     if command -v rkhunter &>/dev/null; then
-        rk_installed=true
-        rk_name="rkhunter"
-        # Log recency check (within 7 days)
-        local rk_log="/var/log/rkhunter.log"
-        if [[ -f "$rk_log" ]]; then
-            local log_mtime log_age now
-            log_mtime=$(sanitize_int "$(portable_stat mtime "$rk_log")")
-            now=$(date +%s 2>/dev/null || echo 0)
-            if [[ $log_mtime -gt 0 && $now -gt 0 ]]; then
-                log_age=$(( (now - log_mtime) / 86400 ))
-                [[ $log_age -le 7 ]] && rk_recent=true
-            fi
-        fi
-    fi
-
-    # chkrootkit as fallback
-    if [[ "$rk_installed" == "false" ]] && command -v chkrootkit &>/dev/null; then
-        rk_installed=true
-        rk_name="chkrootkit"
-        rk_recent=true  # chkrootkit writes no persistent log to check
-    fi
-
-    if [[ "$rk_installed" == "false" ]]; then
-        check_security "Rootkit Detection" "WARN" \
-            "No rootkit scanner installed" \
-            "Install rkhunter: apt install rkhunter && rkhunter --propupd && schedule weekly via cron"
-    elif [[ "$rk_recent" == "false" ]]; then
-        check_security "Rootkit Detection" "WARN" \
-            "$rk_name installed but not run in the past 7 days" \
-            "Schedule 'rkhunter --check --skip-keypress' weekly via cron"
+        check_security "Rootkit Detection" "PASS" "A rootkit scanner is installed (rkhunter)" ""
+    elif command -v chkrootkit &>/dev/null; then
+        check_security "Rootkit Detection" "PASS" "A rootkit scanner is installed (chkrootkit)" ""
     else
-        check_security "Rootkit Detection" "PASS" \
-            "Rootkit scanner present and recently run ($rk_name)" ""
+        check_security "Rootkit Detection" "INFO" "No rootkit scanner is installed" ""
     fi
 }
 
@@ -4365,14 +4336,17 @@ check_exposed_services() {
 
 REPORT_RULE="================================"
 
-# One-line verdict for the summary. Wording follows the number of CRITICAL
-# failures first (that is what needs action) and only then the score band, so
-# "critical" is never claimed for a run that has no critical failure.
-# Usage: get_assessment SCORE CRITICAL_COUNT
+# One-line verdict for the summary. Wording follows the failures first (that is
+# what needs action) and only then the score band, so "critical" is never
+# claimed for a run with no critical failure, and "Excellent"/"Good" are never
+# claimed while a FAIL is open.
+# Usage: get_assessment SCORE CRITICAL_COUNT [FAIL_COUNT]
 get_assessment() {
-    local score="$1" critical="$2"
+    local score="$1" critical="$2" fails="${3:-0}"
     if [[ $critical -gt 0 ]]; then
         echo "Critical issues found - fix the CRITICAL items first"
+    elif [[ $fails -gt 0 && $score -ge 70 ]]; then
+        echo "Mostly hardened, but some checks FAILED - fix those first"
     elif [[ $score -ge 90 ]]; then
         echo "Excellent - your server is well hardened"
     elif [[ $score -ge 70 ]]; then
@@ -4399,19 +4373,20 @@ print_summary() {
     if [[ $CRITICAL_FAIL_COUNT -gt 0 ]]; then
         output "${RED}${BOLD}  of which CRITICAL:${NC} $CRITICAL_FAIL_COUNT"
     fi
+    output "${BLUE}INFO:${NC} $INFO_COUNT ${GRAY}(not scored)${NC}"
     output ""
-    output "Total checks: $total"
+    output "Scored checks: $total"
 
     local score=0 assessment="" color="$GREEN"
     if [[ $total -gt 0 ]]; then
         score=$((PASS_COUNT * 100 / total))
-        assessment="$(get_assessment "$score" "$CRITICAL_FAIL_COUNT")"
+        assessment="$(get_assessment "$score" "$CRITICAL_FAIL_COUNT" "$FAIL_COUNT")"
         if [[ $CRITICAL_FAIL_COUNT -gt 0 || $score -lt 50 ]]; then
             color="$RED"
-        elif [[ $score -lt 90 ]]; then
+        elif [[ $score -lt 90 || $FAIL_COUNT -gt 0 ]]; then
             color="$YELLOW"
         fi
-        output "Security Score: ${BOLD}${score}%${NC}"
+        output "Security Score: ${BOLD}${score}%${NC} ${GRAY}(share of scored checks that passed)${NC}"
         output "${color}Assessment: ${assessment}${NC}"
     fi
     output "${GRAY}Completed in ${duration}${NC}"
@@ -4425,9 +4400,10 @@ print_summary() {
         echo "WARN: $WARN_COUNT"
         echo "FAIL: $FAIL_COUNT"
         echo "CRITICAL FAIL: $CRITICAL_FAIL_COUNT"
-        echo "Total: $total"
+        echo "INFO (not scored): $INFO_COUNT"
+        echo "Scored checks: $total"
         if [[ $total -gt 0 ]]; then
-            echo "Security Score: ${score}%"
+            echo "Security Score: ${score}% (share of scored checks that passed)"
             echo "Assessment: ${assessment}"
         fi
         echo "Duration: $duration"

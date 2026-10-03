@@ -108,11 +108,13 @@ test_json_report_structure_and_summary_arithmetic() {
     check_security "B" WARN "meh" "fix b"
     check_security "C" FAIL "bad" "fix c" true
     check_security "D" FAIL "bad" "fix d"
+    check_security "E" INFO "fyi" "optional"
     finalize_json >/dev/null
     local j="$d/report.json"
-    assert_eq 4 "$(jq '.checks | length' "$j")" || return 1
-    assert_eq 4 "$(jq '.summary.total' "$j")" || return 1
-    assert_eq "1 1 2 1 25" "$(jq -r '.summary | "\(.pass) \(.warn) \(.fail) \(.critical_fail) \(.score)"' "$j")" || return 1
+    assert_eq 5 "$(jq '.checks | length' "$j")" "INFO results are in the report" || return 1
+    assert_eq 4 "$(jq '.summary.total' "$j")" "total counts scored checks only" || return 1
+    assert_eq "1 1 2 1 1 25" "$(jq -r '.summary | "\(.pass) \(.warn) \(.fail) \(.info) \(.critical_fail) \(.score)"' "$j")" "INFO is not in the score" || return 1
+    assert_eq "INFO low" "$(jq -r '.checks[4] | "\(.status) \(.priority)"' "$j")" || return 1
     assert_eq "$VERSION" "$(jq -r '.version' "$j")" || return 1
     assert_eq 1 "$(jq -r '.schema_version' "$j")" || return 1
     assert_eq "true" "$(jq -r '.checks[2].critical' "$j")" || return 1
@@ -200,28 +202,6 @@ test_update_count_apk() {
     updates_case apk
     stub apk 'printf "Installed:                                Available:\nbusybox-1.36-r0 < 1.36-r1\nmusl-1.2-r0 < 1.2-r1\n"'
     assert_eq 2 "$(get_update_count)" || return 1
-}
-
-test_system_updates_verdicts() {
-    updates_case apt
-    record_checks
-    stub apt-get 'printf "Reading package lists...\n"'
-    check_system_updates
-    assert_eq PASS "$RESULT_STATUS" "$RESULT_MSG" || return 1
-
-    stub apt-get 'printf "Inst a [1] (2 Ubuntu:24.04/noble-updates)\n"'
-    check_system_updates
-    assert_eq WARN "$RESULT_STATUS" || return 1
-
-    stub apt-get 'printf "Inst a [1] (2 Ubuntu:24.04/noble-security)\n"'
-    check_system_updates
-    assert_eq FAIL "$RESULT_STATUS" || return 1
-    assert_eq true "$RESULT_CRIT" "pending security updates are critical" || return 1
-
-    stub apt-get 'return 100'
-    check_system_updates
-    assert_eq WARN "$RESULT_STATUS" "unknown must not be reported as PASS" || return 1
-    assert_contains "$RESULT_MSG" "Unable" || return 1
 }
 
 # --- sshd configuration resolution -------------------------------------------

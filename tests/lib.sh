@@ -109,14 +109,31 @@ stub_bin() {
 
 # Replace check_security with a recorder so a test can assert on the verdict a
 # check function reached (status / message / recommendation / critical flag)
-# without parsing console output.
+# without parsing console output. RESULT_* hold the LAST result; every result is
+# also kept in RESULT_LOG so a test can pick one by name with find_result.
 record_checks() {
     RESULT_COUNT=0
     RESULT_NAME="" RESULT_STATUS="" RESULT_MSG="" RESULT_REC="" RESULT_CRIT=""
+    RESULT_LOG=()
     check_security() {
         RESULT_COUNT=$((RESULT_COUNT + 1))
         RESULT_NAME="$1" RESULT_STATUS="$2" RESULT_MSG="$3" RESULT_REC="${4:-}" RESULT_CRIT="${5:-false}"
+        RESULT_LOG+=("$1"$'\x1f'"$2"$'\x1f'"$3"$'\x1f'"${4:-}"$'\x1f'"${5:-false}")
     }
+}
+
+# Load the result recorded under NAME (exact match) into RESULT_*. Fails if the
+# check never reported that name.
+find_result() {
+    local entry n st msg rec crit
+    for entry in "${RESULT_LOG[@]}"; do
+        IFS=$'\x1f' read -r n st msg rec crit <<< "$entry"
+        if [[ "$n" == "$1" ]]; then
+            RESULT_NAME="$n" RESULT_STATUS="$st" RESULT_MSG="$msg" RESULT_REC="$rec" RESULT_CRIT="$crit"
+            return 0
+        fi
+    done
+    fail "no result named [$1]; got: $(printf '%s ' "${RESULT_LOG[@]%%$'\x1f'*}")"
 }
 
 # Define a shell function that shadows an external command for the duration of
