@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2016,SC2034,SC2154,SC2329
 #
 # Severity calibration. A check that reports WARN on every correctly run VPS
 # (Secure Boot on a cloud VM, no USB bus, no compiler policy, ...) drags the
@@ -69,6 +69,10 @@ cron_case() { # allow-content|ABSENT deny-content|ABSENT
     d="$(make_tmp)" || return 1
     CRON_ALLOW="$d/cron.allow"
     CRON_DENY="$d/cron.deny"
+    CRON_ETC_DIRS=("$d/cron.d")
+    CRON_SPOOL_DIRS=("$d/spool")
+    mkdir -p "$d/cron.d" "$d/spool"
+    chmod 755 "$d/cron.d"
     [[ "$1" == ABSENT ]] || printf '%s' "$1" >"$CRON_ALLOW"
     [[ "$2" == ABSENT ]] || printf '%s' "$2" >"$CRON_DENY"
     hide_system_commands
@@ -91,6 +95,34 @@ test_cron_allow_file_is_access_control() {
 test_cron_deny_file_with_entries_is_access_control() {
     cron_case ABSENT $'baduser\n' || return 1
     assert_eq PASS "$RESULT_STATUS" "$RESULT_MSG" || return 1
+}
+
+# Alpine's busybox cron ships a 755 spool directory containing 600 crontabs;
+# flagging that warned on every stock Alpine install (found by the distro matrix).
+test_cron_stock_alpine_spool_layout_is_fine() {
+    cron_case $'root\n' ABSENT || return 1
+    chmod 755 "${CRON_SPOOL_DIRS[0]}"
+    printf '* * * * * true\n' >"${CRON_SPOOL_DIRS[0]}/root"
+    chmod 600 "${CRON_SPOOL_DIRS[0]}/root"
+    check_cron_security
+    assert_eq PASS "$RESULT_STATUS" "$RESULT_MSG" || return 1
+}
+
+test_cron_world_readable_crontab_file_is_flagged() {
+    cron_case $'root\n' ABSENT || return 1
+    printf '* * * * * /usr/bin/backup --password=hunter2\n' >"${CRON_SPOOL_DIRS[0]}/alice"
+    chmod 644 "${CRON_SPOOL_DIRS[0]}/alice"
+    check_cron_security
+    assert_eq WARN "$RESULT_STATUS" || return 1
+    assert_contains "$RESULT_MSG" "readable by other users" || return 1
+}
+
+test_cron_world_writable_spool_directory_is_flagged() {
+    cron_case $'root\n' ABSENT || return 1
+    chmod 777 "${CRON_SPOOL_DIRS[0]}"
+    check_cron_security
+    assert_eq WARN "$RESULT_STATUS" || return 1
+    assert_contains "$RESULT_MSG" "world-writable" || return 1
 }
 
 test_cron_not_installed_is_info() {
@@ -198,19 +230,38 @@ test_secure_boot_disabled_is_info() {
     assert_eq INFO "$RESULT_STATUS" "$RESULT_MSG" || return 1
 }
 
-test_audit_daemon_missing_is_info_but_stopped_is_warn() {
+# auditd is optional on a VPS: absent or installed-but-stopped is INFO.
+# Only a daemon that is running with an empty rule set is a WARN (it logs
+# nothing useful), and running with rules is a PASS.
+test_audit_daemon_absent_or_stopped_is_info() {
     hide_system_commands
     OS_INFO[pkg_manager]=apt
+    OS_INFO[service_manager]=systemd
     stub dpkg 'return 1'
     record_checks
     check_audit_system
-    assert_eq INFO "$RESULT_STATUS" || return 1
+    assert_eq INFO "$RESULT_STATUS" "not installed" || return 1
     stub dpkg 'printf "ii  auditd\n"'
-    OS_INFO[service_manager]=systemd
     stub systemctl 'return 1'
     record_checks
     check_audit_system
-    assert_eq WARN "$RESULT_STATUS" || return 1
+    assert_eq INFO "$RESULT_STATUS" "installed but stopped: $RESULT_MSG" || return 1
+}
+
+test_audit_daemon_running_without_rules_warns_and_with_rules_passes() {
+    hide_system_commands
+    OS_INFO[pkg_manager]=apt
+    OS_INFO[service_manager]=systemd
+    stub dpkg 'printf "ii  auditd\n"'
+    stub systemctl 'return 0'
+    stub auditctl 'echo "No rules"'
+    record_checks
+    check_audit_system
+    assert_eq WARN "$RESULT_STATUS" "running, no rules" || return 1
+    stub auditctl 'printf -- "-w /etc/passwd -p wa -k identity\n"'
+    record_checks
+    check_audit_system
+    assert_eq PASS "$RESULT_STATUS" "running with a rule: $RESULT_MSG" || return 1
 }
 
 test_file_integrity_tool_installed_passes_and_absent_is_info() {

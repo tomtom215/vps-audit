@@ -5,7 +5,10 @@
 # Exits non-zero if the package install failed; the caller still runs the tests
 # so the result shows what degrades without those tools, but marks the leg.
 
-[ -r /etc/os-release ] || { echo "no /etc/os-release" >&2; exit 2; }
+[ -r /etc/os-release ] || {
+    echo "no /etc/os-release" >&2
+    exit 2
+}
 # shellcheck disable=SC1091
 . /etc/os-release
 

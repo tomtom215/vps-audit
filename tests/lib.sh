@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2016,SC2034,SC2329
 #
 # Minimal test framework for vps-audit (no external dependencies).
 #
@@ -101,7 +101,10 @@ hide_system_commands() {
 # `timeout 5 docker ...`), which cannot call shell functions.
 # Usage (after hide_system_commands): stub_bin name 'shell body'
 stub_bin() {
-    [[ -n "${HIDE_DIR:-}" ]] || { echo "stub_bin needs hide_system_commands first" >&2; return 1; }
+    [[ -n "${HIDE_DIR:-}" ]] || {
+        echo "stub_bin needs hide_system_commands first" >&2
+        return 1
+    }
     printf '#!/bin/sh\n%s\n' "$2" >"$HIDE_DIR/$1"
     chmod +x "$HIDE_DIR/$1"
     CMD_CACHE=()
@@ -127,7 +130,7 @@ record_checks() {
 find_result() {
     local entry n st msg rec crit
     for entry in "${RESULT_LOG[@]}"; do
-        IFS=$'\x1f' read -r n st msg rec crit <<< "$entry"
+        IFS=$'\x1f' read -r n st msg rec crit <<<"$entry"
         if [[ "$n" == "$1" ]]; then
             RESULT_NAME="$n" RESULT_STATUS="$st" RESULT_MSG="$msg" RESULT_REC="$rec" RESULT_CRIT="$crit"
             return 0
@@ -148,3 +151,33 @@ run_audit() {
     OUT="$("$AUDIT_SCRIPT" "$@" 2>&1)"
     STATUS=$?
 }
+
+# --- sysctl fakes (shared by several suites) ----------------------------------------
+
+declare -A SYSCTL_FAKE=()
+
+# Make `sysctl -n KEY` answer from SYSCTL_FAKE; unknown keys fail like a kernel
+# without that parameter. The stub is defined per call, inside the test's own
+# subshell, so it cannot shadow the real command for other tests.
+# Usage: sysctl_values "key=val" ...
+sysctl_values() {
+    SYSCTL_FAKE=()
+    local kv
+    for kv in "$@"; do
+        SYSCTL_FAKE["${kv%%=*}"]="${kv#*=}"
+    done
+    stub sysctl '[[ "$1" == "-n" && -n "${SYSCTL_FAKE[$2]+x}" ]] || return 1; printf "%s\n" "${SYSCTL_FAKE[$2]}"'
+}
+
+KERNEL_OK=(
+    kernel.randomize_va_space=2 net.ipv4.tcp_syncookies=1
+    net.ipv4.conf.all.rp_filter=1 net.ipv4.conf.default.rp_filter=1
+    kernel.kptr_restrict=1 kernel.dmesg_restrict=1
+)
+
+NETWORK_OK=(
+    net.ipv4.ip_forward=0 net.ipv4.conf.all.accept_source_route=0
+    net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.all.accept_redirects=0
+    net.ipv4.icmp_echo_ignore_broadcasts=1 net.ipv4.icmp_ignore_bogus_error_responses=1
+    kernel.sysrq=0 kernel.yama.ptrace_scope=1
+)

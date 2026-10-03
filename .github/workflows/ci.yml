@@ -99,7 +99,7 @@ jobs:
           echo "exit status: $rc"
           test "$rc" -le 2
           # The reports are root-owned (mode 600), so read them with sudo.
-          sudo jq -e '.summary.total == (.checks | length) and .summary.total >= 40' "$out"/vps-audit-report-*.json
+          sudo jq -e '.summary.total == ([.checks[] | select(.status != "INFO")] | length) and (.checks | length) >= 45' "$out"/vps-audit-report-*.json
           if grep -E 'line [0-9]+: |command not found|syntax error|bad substitution|unbound variable|integer expression expected|unary operator expected' "$out/audit.log"; then
             echo "::error::Bash runtime error in audit output"
             exit 1
@@ -156,7 +156,7 @@ jobs:
     name: CI OK
     # A single required check for branch protection.
     if: ${{ !cancelled() }}
-    needs: [lint, test, plan, distros]
+    needs: [lint, test, plan, distros, eol-table]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions: {}
@@ -165,3 +165,17 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: echo "$NEEDS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")'
+
+  eol-table:
+    name: EOL table is current
+    # Weekly only: it needs the network and the answer changes over time.
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: ./tools/update-eol-table.sh --check

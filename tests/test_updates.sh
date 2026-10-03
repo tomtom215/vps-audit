@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2016,SC2034,SC2154
 #
 # Update checks. Found by review and reproduced against real configuration:
 # - unattended-upgrades installed but APT::Periodic::Unattended-Upgrade "0"

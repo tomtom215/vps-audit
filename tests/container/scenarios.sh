@@ -15,42 +15,52 @@ trap 'rm -rf "$WORK"' EXIT
 
 failures=0
 pass() { printf 'ok    %s\n' "$1"; }
-fail() { printf 'FAIL  %s\n      %s\n' "$1" "$2"; failures=$((failures + 1)); }
+fail() {
+    printf 'FAIL  %s\n      %s\n' "$1" "$2"
+    failures=$((failures + 1))
+}
 skip() { printf 'skip  %s (%s)\n' "$1" "$2"; }
+
+# expect DESCRIPTION VALUE GLOB: pass when VALUE matches GLOB, else fail and show VALUE.
+expect() {
+    # shellcheck disable=SC2053  # the third argument is deliberately a glob
+    if [[ "$2" == $3 ]]; then pass "$1"; else fail "$1" "got: $2"; fi
+}
 
 # audit CATEGORIES -> path of the JSON report
 audit() {
     local dir
     dir="$(mktemp -d "$WORK/run.XXXXXX")"
     "$AUDIT" --checks "$1" -f json -q --no-network --no-suid -o "$dir" >/dev/null 2>"$dir/stderr"
-    ls "$dir"/vps-audit-report-*.json
+    compgen -G "$dir/vps-audit-report-*.json" | head -n 1
 }
 audit_with_suid() {
     local dir
     dir="$(mktemp -d "$WORK/run.XXXXXX")"
     "$AUDIT" --checks "$1" -f json -q --no-network -o "$dir" >/dev/null 2>"$dir/stderr"
-    ls "$dir"/vps-audit-report-*.json
+    compgen -G "$dir/vps-audit-report-*.json" | head -n 1
 }
 # verdict REPORT "Check Name Prefix" -> "STATUS|critical|message"
 verdict() {
     jq -r --arg n "$2" '.checks[] | select(.name | startswith($n)) | "\(.status)|\(.critical)|\(.message)"' "$1" | head -n 1
 }
 
-command -v jq >/dev/null 2>&1 || { echo "jq is required"; exit 77; }
+command -v jq >/dev/null 2>&1 || {
+    echo "jq is required"
+    exit 77
+}
 
 # --- firewall: real nftables rules ------------------------------------------
 if command -v nft >/dev/null 2>&1 && nft list ruleset >/dev/null 2>&1; then
     nft flush ruleset
     v="$(verdict "$(audit firewall)" "Firewall Status")"
-    [[ "$v" == FAIL\|true\|* ]] && pass "firewall: empty ruleset is a critical FAIL" ||
-        fail "firewall: empty ruleset must be a critical FAIL" "got: $v"
+    expect "firewall: empty ruleset is a critical FAIL" "$v" 'FAIL|true|*'
 
     nft add table inet filter
     nft add chain inet filter input '{ type filter hook input priority 0; policy accept; }'
     nft add rule inet filter input tcp dport 22 accept
     v="$(verdict "$(audit firewall)" "Firewall Status")"
-    [[ "$v" == FAIL\|* ]] && pass "firewall: input hook with policy accept is not protection" ||
-        fail "firewall: policy accept must not pass" "got: $v"
+    expect "firewall: input hook with policy accept is not protection" "$v" 'FAIL|*'
 
     nft flush ruleset
     nft add table inet filter
@@ -58,8 +68,7 @@ if command -v nft >/dev/null 2>&1 && nft list ruleset >/dev/null 2>&1; then
     nft add rule inet filter input ct state established,related accept
     nft add rule inet filter input tcp dport 22 accept
     v="$(verdict "$(audit firewall)" "Firewall Status")"
-    [[ "$v" == PASS\|* ]] && pass "firewall: real default-deny nftables policy passes" ||
-        fail "firewall: policy drop must pass" "got: $v"
+    expect "firewall: real default-deny nftables policy passes" "$v" 'PASS|*'
     nft flush ruleset
 else
     skip "firewall scenarios" "nft unavailable or no CAP_NET_ADMIN"
@@ -71,8 +80,7 @@ cp /etc/shadow "$WORK/shadow.bak"
 echo 'ghost:x:4242:4242::/home/ghost:/bin/bash' >>/etc/passwd
 echo 'ghost::19000:0:99999:7:::' >>/etc/shadow
 v="$(verdict "$(audit users)" "User Accounts")"
-[[ "$v" == FAIL\|*ghost* ]] && pass "users: empty password on a login account is reported by name" ||
-    fail "users: empty password must FAIL and name 'ghost'" "got: $v"
+expect "users: empty password on a login account is reported by name" "$v" 'FAIL|*ghost*'
 cp "$WORK/passwd.bak" /etc/passwd
 cp "$WORK/shadow.bak" /etc/shadow
 
@@ -102,14 +110,23 @@ if command -v sshd >/dev/null 2>&1 || [[ -x /usr/sbin/sshd ]]; then
     printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' >/etc/ssh/sshd_config
     r="$(audit ssh)"
     v="$(verdict "$r" "SSH Root Login")"
-    [[ "$v" == FAIL\|true\|* ]] && pass "ssh: PermitRootLogin yes is a critical FAIL" ||
-        fail "ssh: PermitRootLogin yes must be a critical FAIL" "got: $v"
+    expect "ssh: PermitRootLogin yes is a critical FAIL" "$v" 'FAIL|true|*'
     printf 'PermitRootLogin no\nPasswordAuthentication no\n' >/etc/ssh/sshd_config
     r="$(audit ssh)"
     v="$(verdict "$r" "SSH Root Login")"
-    [[ "$v" == PASS\|* ]] && pass "ssh: PermitRootLogin no passes" || fail "ssh: PermitRootLogin no must pass" "got: $v"
+    expect "ssh: PermitRootLogin no passes" "$v" 'PASS|*'
     v="$(verdict "$r" "SSH Password Auth")"
-    [[ "$v" == PASS\|* ]] && pass "ssh: PasswordAuthentication no passes" || fail "ssh: PasswordAuthentication no must pass" "got: $v"
+    expect "ssh: PasswordAuthentication no passes" "$v" 'PASS|*'
+
+    # PasswordAuthentication no is not enough when keyboard-interactive + PAM can
+    # still ask for the account password (demonstrated on a live sshd).
+    printf 'PermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\nUsePAM yes\n' >/etc/ssh/sshd_config
+    if sshd -t 2>/dev/null && sshd -T 2>/dev/null | grep -qi '^usepam yes'; then
+        v="$(verdict "$(audit ssh)" "SSH Password Auth")"
+        expect "ssh: keyboard-interactive via PAM counts as a password path" "$v" 'WARN|*keyboard-interactive*'
+    else
+        skip "ssh keyboard-interactive scenario" "this sshd has no PAM support"
+    fi
     [[ -f "$WORK/sshd_config.bak" ]] && cp -f "$WORK/sshd_config.bak" /etc/ssh/sshd_config
 else
     skip "ssh scenarios" "sshd not installed"

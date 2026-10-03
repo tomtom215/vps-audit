@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2016,SC2034
 #
 # Firewall detection. The fixtures under tests/fixtures/firewall/ are real
 # `nft list ruleset` / `iptables -S INPUT` output captured from ubuntu:24.04

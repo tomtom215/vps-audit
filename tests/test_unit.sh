@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2016,SC2034,SC2154
 #
 # Pure helper functions and the data-producing primitives (update counting,
 # sshd config resolution, JSON output). Commands are stubbed with shell
@@ -70,6 +70,7 @@ test_classify_bind_scope() {
 
 test_json_escape_basic_characters() {
     assert_eq '\"' "$(json_escape '"')" || return 1
+    # shellcheck disable=SC1003  # '\' is a one-character string, not an escaped quote
     assert_eq '\\' "$(json_escape '\')" || return 1
     assert_eq 'a\tb' "$(json_escape "$(printf 'a\tb')")" || return 1
     assert_eq 'x\\\"y' "$(json_escape 'x\"y')" "backslash is escaped before the quote" || return 1

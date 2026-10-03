@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2034,SC2329
 #
 # System-detection primitives and the regressions found by running the audit
 # on real hosts: service-manager detection, symlink-aware permission reads,
@@ -133,7 +133,6 @@ test_running_services_check_warns_when_unknown() {
     check_running_services
     assert_eq WARN "$RESULT_STATUS" "$RESULT_MSG" || return 1
 }
-
 
 # --- local mounts ------------------------------------------------------------
 

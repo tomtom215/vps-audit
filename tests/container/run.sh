@@ -17,6 +17,7 @@ SRC="${SRC:-/src}"
     for t in sshd nft iptables ufw firewall-cmd systemctl ss jq; do
         printf '%-14s %s\n' "$t:" "$(command -v "$t" 2>/dev/null || echo MISSING)"
     done
+    # shellcheck disable=SC2012  # this records the version of ls itself
     echo "ls:     $(ls --version 2>&1 | head -1)"
     echo "stat:   $(stat --version 2>&1 | head -1)"
 } >"$OUT/env.txt" 2>&1

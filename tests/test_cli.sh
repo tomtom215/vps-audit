@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2016
 #
 # Command-line behaviour as a user sees it. These run the script as a
 # subprocess; none of them need root (help/version/guide/dry-run exit before
@@ -194,4 +194,24 @@ test_config_file_not_owned_by_root_or_caller_is_ignored() {
     HOME="$d" load_config 2>/dev/null
     assert_eq "$before" "${THRESHOLDS[disk_warn]}" || return 1
     rm -rf "$d"
+}
+
+# --- structural lint ----------------------------------------------------------------
+
+# Found when a stale second definition of check_sgid_files silently overrode the
+# rewritten one: in Bash the later definition wins, and nothing warns.
+test_script_defines_every_function_once() {
+    local dups
+    dups="$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{' "$AUDIT_SCRIPT" | sort | uniq -d)"
+    assert_eq "" "$dups" "functions defined more than once" || return 1
+}
+
+# Every check function must be called from main(), or it is dead code that
+# looks like coverage.
+test_every_check_function_is_called_from_main() {
+    local fn missing=""
+    for fn in $(grep -oE '^check_[a-z0-9_]+\(\)' "$AUDIT_SCRIPT" | tr -d '()' | grep -vx check_security); do
+        awk '/^main\(\) \{/ {m=1} m' "$AUDIT_SCRIPT" | grep -qE "^[[:space:]]+${fn}\$" || missing+="$fn "
+    done
+    assert_eq "" "$missing" "check functions never called by main()" || return 1
 }

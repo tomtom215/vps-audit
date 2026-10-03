@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2016,SC2034,SC2154
 #
 # Intrusion prevention. "fail2ban is running" is not protection when it has no
 # jails (AlmaLinux + EPEL ships every jail disabled), and the CrowdSec engine

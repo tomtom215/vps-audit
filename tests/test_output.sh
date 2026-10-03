@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2034,SC2154,SC2329
 #
 # What the user reads: priorities, assessment wording, wrapping, colour and
 # encoding behaviour, report/JSON structure.
@@ -208,4 +208,84 @@ test_invalid_status_is_rejected() {
     init_colors
     check_security "Check" MAYBE "msg" "" 2>/dev/null && return 1
     assert_eq 0 "$((PASS_COUNT + WARN_COUNT + FAIL_COUNT + INFO_COUNT))" || return 1
+}
+
+# --- wrapped notices, info rows and progress ------------------------------------
+# Observed at 40 and 80 columns: [NOTE]/[WARNING] lines, the system-information
+# rows and the progress line ran past the edge of the terminal.
+
+test_notice_wraps_with_hanging_indent_and_stays_within_width() {
+    TERM_COLS=30
+    NC='' GRAY=''
+    local out line
+    out="$(notice "" NOTE "Missing optional commands (curl ss sysctl journalctl) - some checks may be skipped")"
+    while IFS= read -r line; do
+        [[ ${#line} -le 30 ]] || fail "line longer than 30: [$line]" || return 1
+    done <<<"$out"
+    assert_contains "$out" "[NOTE] Missing optional" || return 1
+    assert_contains "$out" $'\n      ' "continuation lines are indented under the message" || return 1
+}
+
+test_notice_strips_control_characters() {
+    TERM_COLS=0
+    NC='' GRAY=''
+    local out
+    out="$(notice "" NOTE $'evil\e[2Jtext\rmore')"
+    assert_eq "[NOTE] evil [2Jtext more" "$out" || return 1
+}
+
+test_print_info_wraps_value_with_four_space_indent() {
+    local d
+    d="$(make_tmp)" || return 1
+    REPORT_FILE="$d/report.txt"
+    : >"$REPORT_FILE"
+    CONFIG[quiet]=false
+    BOLD='' NC=''
+    TERM_COLS=40
+    local out line
+    out="$(print_info "CPU Model" "Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz")"
+    while IFS= read -r line; do
+        [[ ${#line} -le 40 ]] || fail "line longer than 40: [$line]" || return 1
+    done <<<"$out"
+    assert_contains "$out" $'\n    ' "continuation is indented" || return 1
+    assert_eq "CPU Model: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz" "$(cat "$REPORT_FILE")" \
+        "the report file is never wrapped" || return 1
+}
+
+test_print_info_does_not_wrap_when_output_is_not_a_terminal() {
+    local d
+    d="$(make_tmp)" || return 1
+    REPORT_FILE="$d/report.txt"
+    : >"$REPORT_FILE"
+    CONFIG[quiet]=false
+    BOLD='' NC=''
+    TERM_COLS=0
+    local value
+    value="$(printf 'word%d ' {1..40})"
+    value="${value% }"
+    assert_eq "Label: $value" "$(print_info Label "$value")" || return 1
+}
+
+test_show_progress_is_shorter_than_the_terminal() {
+    stdout_is_tty() { return 0; }
+    CONFIG[quiet]=false
+    GRAY='' NC=''
+    TERM_COLS=40
+    local out
+    out="$(show_progress "Checking for world-writable directories under every mount")"
+    out="${out%$'\r'}"
+    [[ ${#out} -le 39 ]] || fail "progress line is ${#out} columns on a 40-column terminal" || return 1
+    out="$(show_progress "Short")"
+    assert_eq $'Short...\r' "$out" "short messages are untouched" || return 1
+}
+
+test_prerequisite_notes_are_deferred_until_after_the_banner() {
+    hide_system_commands
+    CONFIG[quiet]=false
+    local before after
+    before="$(check_prerequisites 2>&1)"
+    assert_eq "" "$before" "check_prerequisites must not print notes itself" || return 1
+    check_prerequisites
+    [[ ${#PREREQ_NOTES[@]} -gt 0 ]] || fail "expected a note about missing optional commands" || return 1
+    assert_contains "${PREREQ_NOTES[0]}" "Missing optional commands" || return 1
 }

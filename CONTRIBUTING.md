@@ -97,6 +97,14 @@ test_my_check_flags_the_bad_state() {
   `tests/container/scenarios.sh` instead.
 - Tests must work on Bash 4.4 and later: no `declare -g`, `local -n`, or
   `[[ -v ]]`.
+- Each file under `tests/` starts with `# shellcheck shell=bash disable=...`
+  naming only the codes it needs. They are structural to the harness, not
+  excuses: `SC2034`/`SC2154` (variables the sourced `vps-audit.sh` reads or sets,
+  which ShellCheck cannot see), `SC2016` (a stub body is code held in single
+  quotes) and `SC2329` (`test_*` functions and stubs are called by name). The
+  scripts that are not tests (`vps-audit.sh`, `tests/matrix.sh`,
+  `tests/container/`, `tools/`) have no file-level exemptions, only a few
+  single-line ones that each say why.
 
 ## Commits and pull requests
 

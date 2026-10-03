@@ -26,9 +26,15 @@ list_only=false
 suites=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -k) filter="${2:?-k needs a substring}"; shift ;;
+        -k)
+            filter="${2:?-k needs a substring}"
+            shift
+            ;;
         -l) list_only=true ;;
-        -h | --help) sed -n '3,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help)
+            sed -n '3,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
         *) suites+=("$1") ;;
     esac
     shift
@@ -76,7 +82,7 @@ for suite in "${suites[@]}"; do
             source "$AUDIT_SCRIPT" || exit 99
             set +o noclobber
             "$name"
-        ) 2>&1 )"
+        ) 2>&1)"
         rc=$?
         # Remove every scratch directory the test created, however it ended.
         while IFS= read -r scratch; do
@@ -109,5 +115,8 @@ if [[ $failed -gt 0 ]]; then
     printf '  %s\n' "${failed_names[@]}"
     exit 1
 fi
-[[ $total -gt 0 ]] || { echo "no tests selected" >&2; exit 2; }
+[[ $total -gt 0 ]] || {
+    echo "no tests selected" >&2
+    exit 2
+}
 exit 0

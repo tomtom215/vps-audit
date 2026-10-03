@@ -52,9 +52,9 @@ MATRIX=(
 )
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-    C_GREEN=$'\033[32m' C_RED=$'\033[31m' C_YELLOW=$'\033[33m' C_OFF=$'\033[0m'
+    C_GREEN=$'\033[32m' C_RED=$'\033[31m' C_OFF=$'\033[0m'
 else
-    C_GREEN='' C_RED='' C_YELLOW='' C_OFF=''
+    C_GREEN='' C_RED='' C_OFF=''
 fi
 
 usage() {
@@ -100,7 +100,7 @@ validate_result() {
     fi
 
     local json report
-    json="$(ls "$dir"/vps-audit-report-*.json 2>/dev/null | head -n 1)"
+    json="$(compgen -G "$dir/vps-audit-report-*.json" | head -n 1)"
     report="${json%.json}.txt"
     if [[ -z "$json" ]]; then
         echo "no JSON report was written"
@@ -116,14 +116,17 @@ validate_result() {
     jq -e --arg cats "$cats" '
         ($cats | split(" ") | map(select(length > 0))) as $valid
         | .summary as $s
-        | ($s.total == (.checks | length))
+        | ([.checks[] | select(.status != "INFO")] | length) as $scored
+        | ([.checks[] | select(.status == "INFO")] | length) as $info
+        | ($s.total == $scored)
+        and ($s.info == $info)
         and ($s.pass + $s.warn + $s.fail == $s.total)
-        and ($s.total >= 40)
+        and ((.checks | length) >= 45)
         and ($s.critical_fail == ([.checks[] | select(.critical)] | length))
         and (.schema_version == 1)
         and all(.checks[];
             (.name | length > 0)
-            and (.status | IN("PASS", "WARN", "FAIL"))
+            and (.status | IN("PASS", "WARN", "FAIL", "INFO"))
             and (.category as $c | $valid | index($c) != null)
             and (.critical | type == "boolean")
             and ((.status == "PASS") == (.priority == null))
@@ -147,6 +150,10 @@ validate_result() {
     if [[ "$kind" == "distro" ]]; then
         jq -e '[.checks[] | select(.name | startswith("Firewall Status")) | .status == "FAIL"] | all' \
             "$json" >/dev/null 2>&1 || echo "Firewall Status must FAIL in a container with no rules"
+        # Every image in the matrix is meant to be a supported release. A FAIL
+        # here means the release has reached end of support: refresh the matrix.
+        jq -e '[.checks[] | select(.name == "OS Support") | .status != "FAIL"] | all' \
+            "$json" >/dev/null 2>&1 || echo "OS Support reports this image as past end of support: update the matrix image list"
     fi
 
     local mode
@@ -160,7 +167,8 @@ validate_result() {
 # --- one image ------------------------------------------------------------------
 run_one() {
     local image="$1" label="$2" kind="$3"
-    local dir="$RESULTS_DIR/$(safe_name "$image")"
+    local dir
+    dir="$RESULTS_DIR/$(safe_name "$image")"
     rm -rf "$dir"
     mkdir -p "$dir"
 
@@ -215,10 +223,20 @@ main() {
     local -a filters=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -h | --help) usage; exit 0 ;;
+            -h | --help)
+                usage
+                exit 0
+                ;;
             -l | --list) list=true ;;
-            -j) jobs="${2:?-j needs a number}"; shift ;;
-            --run-one) shift; run_one "$@"; exit 0 ;;
+            -j)
+                jobs="${2:?-j needs a number}"
+                shift
+                ;;
+            --run-one)
+                shift
+                run_one "$@"
+                exit 0
+                ;;
             *) filters+=("$1") ;;
         esac
         shift
@@ -232,7 +250,10 @@ main() {
             continue
         fi
         for f in "${filters[@]}"; do
-            [[ "$entry" == *"$f"* ]] && { selected+=("$entry"); break; }
+            [[ "$entry" == *"$f"* ]] && {
+                selected+=("$entry")
+                break
+            }
         done
     done
     if [[ ${#selected[@]} -eq 0 ]]; then
@@ -248,13 +269,24 @@ main() {
         exit 0
     fi
 
-    command -v docker >/dev/null 2>&1 || { echo "docker is not installed" >&2; exit 2; }
-    docker info >/dev/null 2>&1 || { echo "cannot reach the Docker daemon" >&2; exit 2; }
-    command -v jq >/dev/null 2>&1 || { echo "jq is required on the host" >&2; exit 2; }
+    command -v docker >/dev/null 2>&1 || {
+        echo "docker is not installed" >&2
+        exit 2
+    }
+    docker info >/dev/null 2>&1 || {
+        echo "cannot reach the Docker daemon" >&2
+        exit 2
+    }
+    command -v jq >/dev/null 2>&1 || {
+        echo "jq is required on the host" >&2
+        exit 2
+    }
     mkdir -p "$RESULTS_DIR"
 
     echo "Running ${#selected[@]} image(s), $jobs at a time. Results: $RESULTS_DIR"
     local out
+    # The single-quoted script is expanded by the inner bash, not here.
+    # shellcheck disable=SC2016
     out="$(for entry in "${selected[@]}"; do printf '%s\0' "$entry"; done |
         xargs -0 -n1 -P "$jobs" bash -c 'IFS="|" read -r i l k <<<"$1"; "$0" --run-one "$i" "$l" "$k"' "${BASH_SOURCE[0]}" 2>&1)"
 

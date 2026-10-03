@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2016,SC2034,SC2329
 #
 # SSH checks, driven by a stubbed `sshd -T` effective-configuration dump
 # (lowercase keys, as OpenSSH prints them).
