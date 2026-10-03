@@ -7,9 +7,8 @@ version; the `VERSION` constant in the script is the single source of truth.
 
 ## [2.5.0] - 2026-10-03
 
-A correctness, accuracy and polish release. Every fix below was reproduced on a
-real system or container first and now has a regression test. **Behaviour
-changes that can affect scripts are listed under "Changed".**
+A correctness, accuracy and polish release. Each fix below has a regression
+test. **Behaviour changes that can affect scripts are listed under "Changed".**
 
 ### Added
 - **`INFO` status.** Results that are worth knowing but are not failures on a
@@ -80,10 +79,13 @@ changes that can affect scripts are listed under "Changed".**
   `--help`, `--dry-run` and the README.
 - Supported and tested releases brought up to date: Ubuntu 22.04, 24.04, 26.04;
   Debian 12, 13; Fedora 43, 44; Rocky and AlmaLinux 9, 10; Amazon Linux 2023;
-  openSUSE Leap 16.0; Arch; Alpine 3.22-3.24. Fedora 39-42, Alpine 3.19-3.21,
-  openSUSE Leap 15.x and Debian 11 are no longer tested.
+  openSUSE Leap 16.0; Arch; Alpine 3.22-3.24. Fedora 39 and 40, Alpine 3.19 and
+  3.20, openSUSE Leap 15.5 and Debian 11 (the old matrix) are no longer tested.
 - CI rebuilt: pinned actions (full commit SHAs) and linters (hashes), least
-  privilege, concurrency, `shfmt` enforced, one required `CI OK` check.
+  privilege, concurrency, `shfmt` enforced, and a single `CI OK` job that
+  summarises the rest, to be used as the one required check. The release
+  workflow is validated with `actionlint` but has not run yet: no tag has been
+  pushed.
 - Links to the project this one was derived from were removed from the script
   and the README. `LICENSE` is unchanged and keeps that project's copyright
   notice, as the MIT license requires.
@@ -162,10 +164,11 @@ changes that can affect scripts are listed under "Changed".**
   operator's terminal or the report.
 
 ### Removed
-- Root-level `test-matrix.sh`, `tests/integration-tests.sh` (many of its tests only
-  searched the source for strings and one crashed ShellCheck 0.11) and
-  `.github/workflows/docker-matrix.yml` (its per-distro outputs were all the same
-  step output, and its `((n++))` counters abort under `bash -e`). Replaced by
+- Root-level `test-matrix.sh`, `tests/integration-tests.sh` (27 `grep` calls only
+  searched the script's own source for strings, and ShellCheck 0.11 crashes on
+  it) and `.github/workflows/docker-matrix.yml` (its per-distro job outputs all
+  came from the same step output, so matrix legs overwrote each other, and its
+  `((n++))` counters abort under `bash -e` when the counter is 0). Replaced by
   `tests/run.sh`, `tests/matrix.sh` and the new CI workflow.
 
 ## [2.4.0] - (previous maintainers' notes, kept as written)
