@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034
+# shellcheck shell=bash disable=SC2016,SC2034
 #
 # Password policy, lockout, mounts, umask, core dumps, key permissions.
 
@@ -181,6 +181,9 @@ core_case() { # coredump.conf.d content|"" limits.d content|""
     [[ -n "$2" ]] && printf '%s\n' "$2" >"$d/limits.d/10-nocore.conf"
     hide_system_commands
     stub sysctl 'echo 0'
+    # The check reads the process's real hard core-file limit; GitHub's runners
+    # start with 0, other machines with "unlimited". Pin it (HARD_CORE_LIMIT).
+    stub ulimit 'echo "${HARD_CORE_LIMIT:-unlimited}"'
     record_checks
     check_core_dumps
 }
@@ -193,6 +196,12 @@ test_core_dumps_coredump_conf_drop_in_counts() {
 test_core_dumps_limits_drop_in_counts() {
     core_case "" "* hard core 0" || return 1
     assert_eq PASS "$RESULT_STATUS" "$RESULT_MSG" || return 1
+}
+
+test_core_dumps_hard_ulimit_zero_is_a_restriction() {
+    HARD_CORE_LIMIT=0 core_case "" "" || return 1
+    assert_eq PASS "$RESULT_STATUS" "$RESULT_MSG" || return 1
+    assert_contains "$RESULT_MSG" "ulimit" || return 1
 }
 
 test_core_dumps_unrestricted_warns() {

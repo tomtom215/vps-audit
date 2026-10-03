@@ -148,10 +148,12 @@ listed under "Changed".**
   appeared only on GitHub's runners and not on the maintainer's machine: the
   matrix could not read its own results when started by a non-root user (the
   audit's reports are root-owned, mode 600, and now belong to the invoking
-  user afterwards), and two kernel-hardening tests depended on the network
-  interfaces of the machine running them. All fixed. The `stub_bin` and
-  interface fixes have tests; the matrix fix was checked by running one image
-  as an unprivileged user before and after.
+  user afterwards), and four tests depended on the machine running them: two
+  kernel-hardening tests (its network interfaces), one core-dump test (its hard
+  core-file limit, 0 on GitHub's runners) and one that assumed SIGPIPE kills a
+  writer (it is ignored under systemd and on the runners). All fixed. The
+  `stub_bin`, interface and core-limit fixes have tests; the matrix fix was
+  checked by running one image as an unprivileged user before and after.
 - **Failed-login counting** ignored `Invalid user` and pre-auth closes, the only
   lines written when password authentication is off.
 - Open ports: DHCP client sockets and `address%interface` forms are handled, the
