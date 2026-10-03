@@ -103,9 +103,11 @@ listed under "Changed".**
 - **PATH Security failed on every merged-`/usr` system** (`stat` read the symlink's
   own mode, 777) and inspected the script's rewritten PATH instead of yours.
 - **SUID, SGID and world-writable scans** covered only the root filesystem and
-  flooded Docker hosts with container-layer files (measured: 125 against 11 real
-  SUID files after pulling one image). They now scan every local mount and skip
-  container storage. Stock-image SUID binaries are allowlisted by exact path and
+  flooded Docker hosts with container-layer files (measured on a host with 37
+  pulled images: the old scan reported 164 unexpected SUID files, all inside
+  Docker's storage, where the 11 real ones were on the standard list; the new
+  scan reports none). They now scan every local mount and skip container
+  storage. Stock-image SUID binaries are allowlisted by exact path and
   every message names the files.
 - **Password login was missed** when `PasswordAuthentication no` coexisted with
   keyboard-interactive authentication and PAM.
