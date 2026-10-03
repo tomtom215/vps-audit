@@ -158,3 +158,38 @@ test_failed_logins_threshold_bands() {
     logins_case "${lines[@]}" || return 1
     assert_eq WARN "$RESULT_STATUS" "12 >= warn(10): $RESULT_MSG" || return 1
 }
+
+# `hostname -f` resolves the machine's own name through DNS when it is not in
+# /etc/hosts (traced with strace: connect() to the resolver on port 53), so
+# --no-network must not call it. Observed as the one remaining network access.
+hostname_case() { # skip_network
+    hide_system_commands
+    CONFIG[skip_network]="$1"
+    HOSTNAME_CALLS="$(make_tmp)/calls"
+    : >"$HOSTNAME_CALLS"
+    stub_bin hostname 'echo "$*" >>"$HOSTNAME_CALLS"; if [ "$1" = "-f" ]; then echo server.example.com; else echo server; fi'
+    export HOSTNAME_CALLS
+}
+
+test_no_network_never_asks_for_the_fqdn() {
+    hostname_case true || return 1
+    assert_eq server "$(get_display_hostname)" || return 1
+    assert_not_contains "$(cat "$HOSTNAME_CALLS")" "-f" "hostname -f can trigger a DNS query" || return 1
+}
+
+test_hostname_is_fully_qualified_when_network_is_allowed() {
+    hostname_case false || return 1
+    assert_eq server.example.com "$(get_display_hostname)" || return 1
+}
+
+test_hostname_falls_back_to_the_short_name_when_the_fqdn_lookup_fails() {
+    hostname_case false || return 1
+    stub_bin hostname 'if [ "$1" = "-f" ]; then exit 1; else echo server; fi'
+    assert_eq server "$(get_display_hostname)" || return 1
+}
+
+test_hostname_unknown_when_nothing_answers() {
+    hostname_case false || return 1
+    stub_bin hostname 'exit 1'
+    assert_eq unknown "$(get_display_hostname)" || return 1
+}

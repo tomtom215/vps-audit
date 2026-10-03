@@ -35,7 +35,10 @@ changes that can affect scripts are listed under "Changed".**
 - **Tests:** a behavioural suite (`tests/run.sh`) driven by stubbed commands and
   real captured fixtures; a distro and Bash-version matrix (`tests/matrix.sh`)
   that runs the suite, real-state scenarios (nftables rules, mounted
-  filesystems, sshd) and a full audit inside a container per image.
+  filesystems, sshd) and a full audit inside a container per image. Bash 4.0 to
+  4.3 run the full audit only (the harness needs 4.4). Their 48 verdicts matched
+  Bash 5.3's apart from live memory and load values and the Alpine release each
+  image ships; that is the evidence for the stated minimum version, Bash 4.0.
 - **Project files:** `SECURITY.md`, issue forms (including "Wrong result"), a pull
   request template, `tools/update-eol-table.sh`.
 - **Release workflow** that checks tag, version and changelog agree, runs the
@@ -78,6 +81,11 @@ changes that can affect scripts are listed under "Changed".**
   openSUSE Leap 15.x and Debian 11 are no longer tested.
 - CI rebuilt: pinned actions (full commit SHAs) and linters (hashes), least
   privilege, concurrency, `shfmt` enforced, one required `CI OK` check.
+- Links to the project this one was derived from were removed from the script
+  and the README. `LICENSE` is unchanged and keeps that project's copyright
+  notice, as the MIT license requires.
+- `tools/update-eol-table.sh` uses the endoflife.date v1 API; its output is
+  identical to the old API's for the embedded table.
 - `LICENSE`, public IP lookup behaviour and exit codes (0, 1, 2) are unchanged.
 
 ### Fixed
@@ -101,6 +109,29 @@ changes that can affect scripts are listed under "Changed".**
 - **JSON was invalid** when a message contained a control character.
 - **Empty-password accounts** were computed but never reported (and locked
   accounts were counted as empty).
+- **Checks that read a command's output with `grep -q` or `head` could give the
+  wrong answer when the command printed a lot.** The script runs under
+  `set -o pipefail`; `producer | grep -q pattern` makes a producer that is
+  still writing die of SIGPIPE, and `pipefail` then reports the match as a
+  failure. Reproduced with 30,000 lines of output; the size at which real
+  hosts hit it was not measured. Five checks were affected: iptables
+  default-deny (a firewalled host with a large ruleset, typically Docker, could
+  be reported as having no firewall), rarely used protocols that are loaded,
+  `usb_storage` loaded, process-accounting data, and rootless Docker. A test
+  now rejects the pattern.
+- **Security updates were counted per advisory row on dnf/yum**, not per
+  package: a fresh Rocky Linux 9 image printed "62 security updates (43
+  total)". It now counts distinct packages.
+- **`--no-network` still resolved the server's own name through DNS** (`hostname
+  -f`, traced as a connect to the resolver) when the name was not in
+  `/etc/hosts`. It no longer does; with `--no-network` the audit opens no
+  connection to another machine (checked by tracing its socket calls).
+- **Standard SGID helpers were reported as "outside the standard set"** on
+  unmodified Ubuntu, RHEL-family, Amazon Linux and Arch images
+  (`pam_extrausers_chkpwd`, `utempter`, `ssh-keysign`, `unix_chkpwd`).
+- Messages use the singular where it applies ("1 security update available").
+- **Test harness:** `stub_bin` wrote through a link to a real utility and
+  replaced `/usr/bin/hostname` when the suite ran as root. Fixed, with a test.
 - **Failed-login counting** ignored `Invalid user` and pre-auth closes, the only
   lines written when password authentication is off.
 - Open ports: DHCP client sockets and `address%interface` forms are handled, the

@@ -38,7 +38,8 @@ is the single list CI reads.
 | `tests/run.sh`, `tests/lib.sh` | Test runner and helpers (assertions, stubbing). |
 | `tests/test_*.sh` | Test suites. Every `test_*` function runs in its own subshell. |
 | `tests/fixtures/` | Real command output captured from real systems. |
-| `tests/matrix.sh`, `tests/container/` | Distro/Bash matrix: unit tests, real-state scenarios and a full audit inside a container per image. |
+| `tests/matrix.sh`, `tests/container/` | Distro/Bash matrix: unit tests, real-state scenarios and a full audit inside a container per image (Bash 4.0-4.3 run the full audit only, because the harness needs 4.4). |
+| `tools/update-eol-table.sh` | Regenerates the end-of-support table embedded in `vps-audit.sh` from endoflife.date (CI checks it weekly). |
 | `.github/workflows/` | CI and release. |
 
 ## Principles
@@ -56,6 +57,13 @@ is the single list CI reads.
 - **ASCII output only**, wrapped to the terminal when stdout is a terminal.
 - No `set -e` / `set -u`: checks probe things that may legitimately be absent,
   and errors are handled at each call site.
+- **`set -o pipefail` is on, so never pipe into `grep -q` or any reader that
+  stops early.** A producer still writing dies of SIGPIPE and the pipeline
+  reports failure although the pattern matched. Capture the output and use a
+  here-string (`grep -q pat <<<"$out"`), or let `grep` read everything
+  (`grep pat >/dev/null`). A test enforces this.
+- Anything `--no-network` must not do includes DNS: `hostname -f` resolves the
+  machine's own name when it is not in `/etc/hosts`.
 
 ## Adding a check
 
@@ -87,7 +95,8 @@ test_my_check_flags_the_bad_state() {
 ```
 
 - `stub_bin` writes a real executable instead (needed when the code runs the
-  command through `timeout`, `xargs`, etc.).
+  command through `timeout`, `xargs`, etc.). It replaces the scratch-PATH entry
+  rather than writing through it, so it never touches the real utility.
 - System files are variables (`PASSWD_FILE`, `SHADOW_FILE`, `PROC_MOUNTS`, ...)
   that a test can point at a fixture after the script is sourced.
 - Fixtures should be **real output** captured from the real tool (see

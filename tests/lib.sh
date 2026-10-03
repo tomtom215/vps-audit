@@ -105,6 +105,9 @@ stub_bin() {
         echo "stub_bin needs hide_system_commands first" >&2
         return 1
     }
+    # The name may be a link to the real utility: remove it first, or the stub
+    # would be written through the link over the real binary.
+    rm -f "$HIDE_DIR/$1"
     printf '#!/bin/sh\n%s\n' "$2" >"$HIDE_DIR/$1"
     chmod +x "$HIDE_DIR/$1"
     CMD_CACHE=()

@@ -1203,6 +1203,24 @@ print_header() {
     } >>"$REPORT_FILE"
 }
 
+# Name shown in the report header: the fully qualified name when allowed.
+# `hostname -f` resolves the name through DNS when it is not in /etc/hosts, so
+# --no-network skips it. It can also BLOCK for the resolver timeout on a VPS
+# with broken DNS (the fallback only fires on a non-zero exit, not on a hang),
+# so it is bounded with `timeout`.
+get_display_hostname() {
+    local name=""
+    if [[ "${CONFIG[skip_network]}" == "true" ]]; then
+        name=$(hostname 2>/dev/null)
+    elif has_command timeout; then
+        name=$(timeout 2 hostname -f 2>/dev/null || hostname 2>/dev/null)
+    else
+        name=$(hostname 2>/dev/null)
+    fi
+    [[ -n "$name" ]] || name="unknown"
+    printf '%s' "$name"
+}
+
 print_info() {
     local label value
     label="$(printable "${1:-}")"
@@ -4893,16 +4911,7 @@ main() {
     local hostname kernel_version uptime_info uptime_since public_ip
     local cpu_info cpu_cores total_mem total_disk load_avg
 
-    # `hostname -f` performs FQDN/reverse-DNS resolution and can BLOCK for the
-    # resolver timeout on a VPS with broken DNS (the `|| hostname` fallback only
-    # fires on non-zero exit, not on a hang). Bound it with `timeout` when
-    # available, and always fall back to the plain (non-resolving) hostname.
-    if has_command timeout; then
-        hostname=$(timeout 2 hostname -f 2>/dev/null || hostname 2>/dev/null)
-    else
-        hostname=$(hostname 2>/dev/null)
-    fi
-    [[ -z "$hostname" ]] && hostname="unknown"
+    hostname=$(get_display_hostname)
     kernel_version=$(uname -r)
     uptime_info=$(get_uptime)
     uptime_since=$(get_uptime_since)

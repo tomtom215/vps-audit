@@ -319,3 +319,20 @@ test_update_count_dnf_security_none_is_zero_and_success() {
     n="$(get_security_update_count)" || fail "zero security updates must not be an error"
     assert_eq 0 "$n" || return 1
 }
+
+# hide_system_commands links utilities (hostname, timeout, ...) into the scratch
+# PATH directory. stub_bin used to write the stub THROUGH such a link, replacing
+# the real /usr/bin/hostname when the suite ran as root (found on this project's
+# own dev machine). The target here is a scratch file, so the test is safe to
+# run even against the unfixed helper.
+test_stub_bin_never_writes_through_a_symlinked_utility() {
+    hide_system_commands || return 1
+    local real
+    real="$(make_tmp)/real-utility"
+    printf '#!/bin/sh\necho real\n' >"$real"
+    chmod +x "$real"
+    ln -s "$real" "$HIDE_DIR/fake-utility"
+    stub_bin fake-utility 'echo stub'
+    assert_eq real "$("$real")" "the symlink target must be left alone" || return 1
+    assert_eq stub "$("$HIDE_DIR/fake-utility")" "the stub must take its place" || return 1
+}
