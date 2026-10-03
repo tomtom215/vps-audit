@@ -1,11 +1,26 @@
-# Dependabot configuration
-# Keeps GitHub Actions up to date
-
+# Dependabot: keep CI actions and the pinned linters current.
+# (The actionlint version and checksum live in ci.yml and are bumped by hand.)
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
     commit-message:
       prefix: "ci"
+    labels: ["dependencies", "ci"]
+
+  - package-ecosystem: "pip"
+    directory: "/.github"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies", "ci"]

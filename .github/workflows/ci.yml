@@ -4,448 +4,164 @@ on:
   push:
     branches: ['**']
   pull_request:
-    branches: [main, master]
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly: catches drift in distro images and tooling when nothing was pushed.
+    - cron: '17 4 * * 1'
+
+# Nothing gets a token by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  # One run per event type and branch; a newer push cancels the older run.
+  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+# Pull requests from branches in this repository are already covered by their
+# push event, so every job carries the same condition: run the pull_request event
+# only for forks.
 
 jobs:
   lint:
-    name: Lint & Syntax Check
-    runs-on: ubuntu-latest
+    name: Lint
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
-      - name: Run bash syntax check
-        id: syntax
+      - name: Install ShellCheck and shfmt (pinned, hash-verified)
         run: |
-          echo "### Bash Syntax Check" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| File | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          python3 -m venv "$RUNNER_TEMP/lint"
+          "$RUNNER_TEMP/lint/bin/pip" install --quiet --require-hashes -r .github/requirements-lint.txt
+          echo "$RUNNER_TEMP/lint/bin" >> "$GITHUB_PATH"
 
-          SYNTAX_FAILED=0
-
-          for script in vps-audit.sh test-matrix.sh tests/integration-tests.sh; do
-            if bash -n "$script" 2>/dev/null; then
-              echo "| \`$script\` | PASS |" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "| \`$script\` | FAIL |" >> $GITHUB_STEP_SUMMARY
-              SYNTAX_FAILED=1
-            fi
-          done
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          if [ $SYNTAX_FAILED -eq 1 ]; then
-            echo "**[FAIL] Syntax check failed**" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          else
-            echo "**[PASS] All syntax checks passed**" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Run shellcheck
-        id: shellcheck
+      - name: Install actionlint (pinned, checksum-verified)
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
         run: |
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ShellCheck Static Analysis" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
-          SHELLCHECK_FAILED=0
-          TOTAL_WARNINGS=0
-          TOTAL_ERRORS=0
+      - name: Tool versions
+        run: |
+          shellcheck --version | sed -n '2p'
+          shfmt --version
+          actionlint -version | head -n 1
 
-          for script in vps-audit.sh test-matrix.sh tests/integration-tests.sh; do
-            echo "#### \`$script\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+      - name: Bash syntax
+        run: git ls-files '*.sh' | xargs -n1 bash -n
 
-            # Run shellcheck and capture output
-            set +e
-            SC_OUTPUT=$(shellcheck -x -S warning -f gcc "$script" 2>&1)
-            SC_EXIT=$?
-            set -e
+      - name: ShellCheck
+        run: git ls-files '*.sh' | xargs shellcheck -x
 
-            # Use ShellCheck's exit status as the source of truth: it is
-            # non-zero if and only if there is at least one finding at the
-            # -S severity. (The display counts below match the gcc format
-            # "file:line:col: warning: ..." - note the space before the
-            # severity, which the previous ":warning:" pattern never matched,
-            # silently disabling this gate.)
-            if [ "$SC_EXIT" -eq 0 ]; then
-              echo "[PASS] No issues found" >> $GITHUB_STEP_SUMMARY
-            else
-              WARNINGS=$(echo "$SC_OUTPUT" | grep -cE ": warning:" || true)
-              ERRORS=$(echo "$SC_OUTPUT" | grep -cE ": error:" || true)
-              TOTAL_WARNINGS=$((TOTAL_WARNINGS + WARNINGS))
-              TOTAL_ERRORS=$((TOTAL_ERRORS + ERRORS))
-              SHELLCHECK_FAILED=1
+      - name: shfmt
+        run: git ls-files '*.sh' | xargs shfmt -d
 
-              echo "[FAIL] Found $ERRORS error(s) and $WARNINGS warning(s)" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "<details>" >> $GITHUB_STEP_SUMMARY
-              echo "<summary>View issues</summary>" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              echo "$SC_OUTPUT" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              echo "</details>" >> $GITHUB_STEP_SUMMARY
-            fi
-            echo "" >> $GITHUB_STEP_SUMMARY
-          done
+      - name: actionlint
+        run: actionlint
 
-          # Summary
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Lint Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Files Checked | 3 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Total Errors | $TOTAL_ERRORS |" >> $GITHUB_STEP_SUMMARY
-          echo "| Total Warnings | $TOTAL_WARNINGS |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          if [ $SHELLCHECK_FAILED -eq 1 ]; then
-            echo "**[FAIL] ShellCheck found issues that need attention**" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          else
-            echo "**[PASS] All ShellCheck checks passed**" >> $GITHUB_STEP_SUMMARY
-          fi
-
-  integration-tests:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: lint
+  test:
+    name: Tests on the runner
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Run integration tests
-        id: integration
+      - name: Unit and CLI tests (as an ordinary user)
+        run: ./tests/run.sh
+
+      - name: Unit and CLI tests (as root)
+        run: sudo ./tests/run.sh
+
+      - name: Full audit on this real systemd host
         run: |
-          echo "## Integration Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Started:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          START_TIME=$(date +%s)
-
-          # Run tests and capture output
+          out="$RUNNER_TEMP/audit"
+          mkdir "$out"
           set +e
-          TEST_OUTPUT=$(./tests/integration-tests.sh 2>&1)
-          TEST_EXIT=$?
+          sudo ./vps-audit.sh -f both -o "$out" --no-network 2>&1 | tee "$out/audit.log"
+          rc=${PIPESTATUS[0]}
           set -e
-
-          END_TIME=$(date +%s)
-          DURATION=$((END_TIME - START_TIME))
-
-          echo "**Duration:** ${DURATION}s" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Parse test categories and results
-          echo "### Test Categories" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Basic Tests
-          echo "#### Basic Tests" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-
-          if echo "$TEST_OUTPUT" | grep -q "Script exists.*PASS"; then
-            echo "| Script exists | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "Script exists.*FAIL"; then
-            echo "| Script exists | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "Script is executable.*PASS"; then
-            echo "| Script is executable | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "Script is executable.*FAIL"; then
-            echo "| Script is executable | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "Bash syntax check.*PASS"; then
-            echo "| Bash syntax check | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "Bash syntax check.*FAIL"; then
-            echo "| Bash syntax check | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Command Line Options
-          echo "#### Command Line Options" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-
-          if echo "$TEST_OUTPUT" | grep -q "\-\-help option.*PASS"; then
-            echo "| --help option | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "\-\-help option.*FAIL"; then
-            echo "| --help option | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "\-\-version option.*PASS"; then
-            echo "| --version option | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "\-\-version option.*FAIL"; then
-            echo "| --version option | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "\-\-guide option.*PASS"; then
-            echo "| --guide option | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "\-\-guide option.*FAIL"; then
-            echo "| --guide option | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "\-\-dry-run option.*PASS"; then
-            echo "| --dry-run option | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "\-\-dry-run option.*FAIL"; then
-            echo "| --dry-run option | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "Invalid option handling.*PASS"; then
-            echo "| Invalid option handling | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "Invalid option handling.*FAIL"; then
-            echo "| Invalid option handling | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "\-\-checks filter.*PASS"; then
-            echo "| --checks filter | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "\-\-checks filter.*FAIL"; then
-            echo "| --checks filter | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "Quiet mode with help.*PASS"; then
-            echo "| Quiet mode with help | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "Quiet mode with help.*FAIL"; then
-            echo "| Quiet mode with help | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Function Tests
-          echo "#### Function Tests" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-
-          if echo "$TEST_OUTPUT" | grep -q "is_numeric function.*PASS"; then
-            echo "| is_numeric function | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "is_numeric function.*FAIL"; then
-            echo "| is_numeric function | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "JSON escaping.*PASS"; then
-            echo "| JSON escaping | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "JSON escaping.*FAIL"; then
-            echo "| JSON escaping | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "portable_stat function.*PASS"; then
-            echo "| portable_stat function | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "portable_stat function.*FAIL"; then
-            echo "| portable_stat function | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "has_command function.*PASS"; then
-            echo "| has_command function | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "has_command function.*FAIL"; then
-            echo "| has_command function | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "TOOL_INFO array.*PASS"; then
-            echo "| TOOL_INFO array | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "TOOL_INFO array.*FAIL"; then
-            echo "| TOOL_INFO array | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Output Format Tests
-          echo "#### Output Format Tests" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-
-          if echo "$TEST_OUTPUT" | grep -q "Text output format.*PASS"; then
-            echo "| Text output format | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "Text output format.*FAIL"; then
-            echo "| Text output format | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "JSON output format.*PASS"; then
-            echo "| JSON output format | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "JSON output format.*FAIL"; then
-            echo "| JSON output format | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Threshold Option Tests
-          echo "#### Threshold Option Tests" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-
-          if echo "$TEST_OUTPUT" | grep -q "disk-warn threshold.*PASS"; then
-            echo "| disk-warn threshold | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "disk-warn threshold.*FAIL"; then
-            echo "| disk-warn threshold | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "mem-warn threshold.*PASS"; then
-            echo "| mem-warn threshold | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "mem-warn threshold.*FAIL"; then
-            echo "| mem-warn threshold | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "login-warn threshold.*PASS"; then
-            echo "| login-warn threshold | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "login-warn threshold.*FAIL"; then
-            echo "| login-warn threshold | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "Invalid threshold handling.*PASS"; then
-            echo "| Invalid threshold handling | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "Invalid threshold handling.*FAIL"; then
-            echo "| Invalid threshold handling | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Skip Option Tests
-          echo "#### Skip Option Tests" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-
-          if echo "$TEST_OUTPUT" | grep -q "\-\-no-network option.*PASS"; then
-            echo "| --no-network option | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "\-\-no-network option.*FAIL"; then
-            echo "| --no-network option | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if echo "$TEST_OUTPUT" | grep -q "\-\-no-suid option.*PASS"; then
-            echo "| --no-suid option | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "\-\-no-suid option.*FAIL"; then
-            echo "| --no-suid option | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Error Handling Tests
-          echo "#### Error Handling Tests" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-
-          if echo "$TEST_OUTPUT" | grep -q "Missing output directory.*PASS"; then
-            echo "| Missing output directory | PASS |" >> $GITHUB_STEP_SUMMARY
-          elif echo "$TEST_OUTPUT" | grep -q "Missing output directory.*FAIL"; then
-            echo "| Missing output directory | FAIL |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Extract summary from test output
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Test Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Extract pass/fail counts
-          PASSED=$(echo "$TEST_OUTPUT" | grep -oP "Passed:\s+\K\d+" | head -1 || echo "0")
-          FAILED=$(echo "$TEST_OUTPUT" | grep -oP "Failed:\s+\K\d+" | head -1 || echo "0")
-          TOTAL=$(echo "$TEST_OUTPUT" | grep -oP "Total tests:\s+\K\d+" | head -1 || echo "0")
-
-          echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Total Tests | $TOTAL |" >> $GITHUB_STEP_SUMMARY
-          echo "| Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
-          echo "| Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          if [ "$TOTAL" -gt 0 ] 2>/dev/null; then
-            PASS_RATE=$((PASSED * 100 / TOTAL))
-            echo "**Pass Rate:** ${PASS_RATE}%" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Overall result
-          if [ $TEST_EXIT -eq 0 ]; then
-            echo "## Result: PASSED" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "All integration tests passed." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## Result: FAILED" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Some integration tests failed." >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "<details>" >> $GITHUB_STEP_SUMMARY
-            echo "<summary>Full Test Output (click to expand)</summary>" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "$TEST_OUTPUT" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "exit status: $rc"
+          test "$rc" -le 2
+          # The reports are root-owned (mode 600), so read them with sudo.
+          sudo jq -e '.summary.total == (.checks | length) and .summary.total >= 40' "$out"/vps-audit-report-*.json
+          if grep -E 'line [0-9]+: |command not found|syntax error|bad substitution|unbound variable|integer expression expected|unary operator expected' "$out/audit.log"; then
+            echo "::error::Bash runtime error in audit output"
             exit 1
           fi
 
-  summary:
-    name: CI Summary
-    runs-on: ubuntu-latest
-    needs: [lint, integration-tests]
-    if: always()
+  plan:
+    name: Plan distro matrix
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      images: ${{ steps.list.outputs.images }}
     steps:
-      - name: Generate CI summary
-        run: |
-          echo "# CI Pipeline Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Event:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: list
+        # tests/matrix.sh is the single list of images; the workflow just reads it.
+        run: echo "images=$(./tests/matrix.sh -l | awk '{print $1}' | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
 
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+  distros:
+    name: ${{ matrix.image }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.images) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-          echo "## Job Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+      - name: Run tests, scenarios and a full audit in ${{ matrix.image }}
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: ./tests/matrix.sh "$IMAGE"
 
-          case "${{ needs.lint.result }}" in
-            success) echo "| Lint & Syntax Check | PASS |" >> $GITHUB_STEP_SUMMARY ;;
-            failure) echo "| Lint & Syntax Check | FAIL |" >> $GITHUB_STEP_SUMMARY ;;
-            cancelled) echo "| Lint & Syntax Check | CANCELLED |" >> $GITHUB_STEP_SUMMARY ;;
-            skipped) echo "| Lint & Syntax Check | SKIP |" >> $GITHUB_STEP_SUMMARY ;;
-          esac
+      - name: Keep results for diagnosis
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: results-${{ strategy.job-index }}
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
 
-          case "${{ needs.integration-tests.result }}" in
-            success) echo "| Integration Tests | PASS |" >> $GITHUB_STEP_SUMMARY ;;
-            failure) echo "| Integration Tests | FAIL |" >> $GITHUB_STEP_SUMMARY ;;
-            cancelled) echo "| Integration Tests | CANCELLED |" >> $GITHUB_STEP_SUMMARY ;;
-            skipped) echo "| Integration Tests | SKIP |" >> $GITHUB_STEP_SUMMARY ;;
-          esac
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Overall result
-          if [ "${{ needs.lint.result }}" == "success" ] && [ "${{ needs.integration-tests.result }}" == "success" ]; then
-            echo "## Overall Result: PASSED" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "All checks completed successfully. Ready for merge." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## Overall Result: FAILED" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Some checks failed. Please review the job logs above for details." >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+  ci-ok:
+    name: CI OK
+    # A single required check for branch protection.
+    if: ${{ !cancelled() }}
+    needs: [lint, test, plan, distros]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Every job succeeded (or was skipped as a duplicate)
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")'

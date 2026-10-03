@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest a new check or an improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve for someone who has just provisioned a VPS?
+    validations:
+      required: true
+  - type: textarea
+    id: detection
+    attributes:
+      label: How could it be detected?
+      description: A read-only command or file that shows the state, and what a safe value looks like. Checks must not change the system.
+  - type: textarea
+    id: refs
+    attributes:
+      label: References
+      description: CIS benchmark item, distribution documentation, etc.
