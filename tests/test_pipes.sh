@@ -18,14 +18,24 @@ big_output() {
 }
 
 test_the_hazard_is_real_in_this_shell() {
-    # Guard for the tests below: if this fails they prove nothing.
+    # Guard for the tests below: if this fails they prove nothing. The pipeline
+    # fails although grep matched, whether the writer dies of SIGPIPE (status
+    # 141) or, with SIGPIPE ignored as under systemd and on GitHub's runners,
+    # gets "Broken pipe" and exits 1.
     local rc
     (
         set -o pipefail
-        big_output | grep -q 'filler line 0 '
+        big_output 2>/dev/null | grep -q 'filler line 0 '
     )
     rc=$?
-    assert_eq 141 "$rc" "grep -q before a large producer must give SIGPIPE here" || return 1
+    assert_ne 0 "$rc" "grep -q before a large producer must fail under pipefail (default SIGPIPE)" || return 1
+    (
+        trap '' PIPE
+        set -o pipefail
+        big_output 2>/dev/null | grep -q 'filler line 0 '
+    )
+    rc=$?
+    assert_ne 0 "$rc" "the same with SIGPIPE ignored" || return 1
 }
 
 test_iptables_default_deny_survives_a_large_ruleset() {
@@ -35,6 +45,14 @@ test_iptables_default_deny_survives_a_large_ruleset() {
     for i in 1 2 3; do
         iptables_input_default_deny iptables || fail "run $i: policy DROP on the first line was missed" || return 1
     done
+}
+
+# systemd services and GitHub's runners start processes with SIGPIPE ignored.
+test_iptables_default_deny_survives_a_large_ruleset_with_sigpipe_ignored() {
+    hide_system_commands
+    trap '' PIPE
+    stub iptables 'echo "-P INPUT DROP"; big_output 30000'
+    iptables_input_default_deny iptables || fail "policy DROP on the first line was missed" || return 1
 }
 
 test_iptables_final_drop_survives_a_large_ruleset() {

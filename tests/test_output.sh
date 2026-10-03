@@ -328,7 +328,11 @@ test_closing_message_fits_a_40_column_terminal_and_keeps_the_path_whole() {
     CRITICAL_FAIL_COUNT=1 FAIL_COUNT=1
     out="$(print_closing_message)"
     assert_contains "$out" "$path" "the path must stay in one piece so it can be copied" || return 1
-    out="$(grep -v -F "$path" <<<"$out")"
+    # The command to run is "sudo $0 --guide": its length depends on how the
+    # script was invoked, and a command is not word-wrapped, so leave it out of
+    # the width check (and check it is there).
+    assert_contains "$out" "--guide" || return 1
+    out="$(grep -v -F -e "$path" -e "--guide" <<<"$out")"
     local n
     n="$(longest_line "$out")"
     [[ $n -le 40 ]] || fail "a line is $n columns wide: $(awk 'length($0) > 40' <<<"$out" | head -1)" || return 1
