@@ -1,0 +1,48 @@
+name: Wrong result (false positive / false negative)
+description: A check reported PASS, WARN or FAIL, and you believe that is wrong
+labels: ["accuracy"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A check that is wrong is the most valuable report for an audit tool. Please show the evidence.
+        Redact hostnames, IP addresses and usernames.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `./vps-audit.sh --version`
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Debian GNU/Linux 13 (trixie)"
+    validations:
+      required: true
+  - type: input
+    id: check
+    attributes:
+      label: The check and its verdict
+      placeholder: "[PASS] Firewall Status (nftables) - ..."
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: What is actually true on the server
+      description: The command output that shows the real state (for example `nft list ruleset`, `sshd -T | grep -i permitroot`).
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of error
+      options:
+        - False positive (reported a problem that is not one)
+        - False negative (missed a real problem)
+        - Misleading recommendation
+    validations:
+      required: true

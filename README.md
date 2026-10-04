@@ -1,532 +1,406 @@
-# VPS Security Audit Script
+# VPS Audit
 
-A comprehensive Bash script for auditing the security and hardening of your VPS (Virtual Private Server). This tool performs 40+ security checks and provides a detailed report with prioritized recommendations for improvements.
+[![CI](https://github.com/tomtom215/vps-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/tomtom215/vps-audit/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Perfect for new VPS setup** - Run this script right after receiving your server credentials to identify and fix security issues.
+**Find out what to fix first on a Linux server.** `vps-audit.sh` is a single Bash
+file that inspects a VPS, prints what passed and what did not, and ends with a
+prioritised to-do list. It is read-only: it never changes your configuration.
 
-> **Fork Notice:** This is an actively maintained fork of [vernu/vps-audit](https://github.com/vernu/vps-audit). Versions 2.1.0+ include additional hardening checks, cross-platform compatibility improvements, and a comprehensive test suite. See [Changelog](#changelog) for details.
+Run it right after you receive a new server's credentials, and again after you
+harden it.
 
-![Sample Output](./screenshot.png)
+![Sample output](docs/sample-output.png)
 
-## Features
+<sub>A real run inside an Ubuntu 24.04 container with the packages from
+`tests/container/setup.sh` (OpenSSH, ufw, nftables, iptables), 80 columns wide,
+with `--no-network`. A real server's results will differ.</sub>
 
-### Security Checks (40+)
+## What it does
 
-#### SSH Configuration
-- Root login status
-- Password authentication
-- Non-default port detection
-- SSH key permissions (`.ssh` directories and `authorized_keys`)
+- Runs **54 checks in 24 categories**: SSH, firewall, updates, intrusion
+  prevention, accounts, file permissions, kernel hardening, Docker, and more
+  ([full list](#what-is-checked)).
+- Reports each as `PASS`, `WARN`, `FAIL` or `INFO`, then lists the fixes in
+  priority order, each saying what to change and to which value.
+- Understands how current servers are really configured: nftables and Docker's
+  firewall rules, `sshd_config.d` drop-ins, journald-only logging, sudo-rs,
+  merged-`/usr`, containers without systemd.
+- Writes a text report and/or a JSON report (mode `600`) and sets an exit code,
+  so it works from cron and monitoring.
 
-#### Firewall & Network
-- Firewall status (UFW, firewalld, iptables, nftables)
-- Open ports detection (with public vs localhost categorization)
-- IPv6 security (firewall rules when enabled)
-- Dangerous network protocols (dccp, sctp, rds, tipc)
-- Wireless interface detection (for servers)
+## Quick start
 
-#### Intrusion Prevention & Access Control
-- Fail2ban, CrowdSec (native and Docker)
-- Account lockout policy (pam_faillock/pam_tally2)
-- Login warning banner configuration
+```bash
+# Download a release and verify it
+curl -fsSLO https://github.com/tomtom215/vps-audit/releases/latest/download/vps-audit.sh
+curl -fsSLO https://github.com/tomtom215/vps-audit/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS
+chmod +x vps-audit.sh
 
-#### System Updates
-- Available system updates (with security update differentiation)
-- Automatic updates (unattended-upgrades, dnf-automatic, yum-cron)
+sudo ./vps-audit.sh              # run every check
+sudo ./vps-audit.sh --guide      # step-by-step hardening for a brand-new VPS
+```
 
-#### Authentication & Authorization
-- Failed login attempts (journalctl and log file support)
-- Password policy enforcement (pwquality checking)
-- Sudo logging configuration (includes sudoers.d)
-- User account auditing (UID 0, empty passwords, login shells)
+The release workflow publishes `SHA256SUMS` and a build-provenance attestation
+with each release: `gh attestation verify vps-audit.sh --repo tomtom215/vps-audit`.
+The development version is one file on the `main` branch (no checksum is
+published for it):
 
-#### File System Security
-- SUID files detection (with extended whitelist)
-- SGID files detection
-- World-writable files/directories
-- Log file permissions
-- Umask settings
-- Cron security (permissions and access control)
-
-#### System Hardening
-- Mandatory Access Control (SELinux, AppArmor)
-- Kernel hardening (6 critical sysctl parameters)
-- Core dump settings
-- USB storage restrictions
-- Secure Boot / GRUB password
-- Compiler/development tools presence
-
-#### Monitoring & Auditing
-- Running services analysis
-- Time synchronization (systemd-timesyncd, chronyd, ntpd)
-- Audit system (auditd status and rules)
-- Process accounting (psacct/acct)
-
-### Performance Monitoring
-- Disk space usage
-- Memory usage
-- CPU usage
-- Load average
-
-### Output Formats
-- **Text Report** - Human-readable with color-coded results
-- **JSON Report** - Machine-readable for automation and monitoring
-- **Both** - Generate both formats simultaneously
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tomtom215/vps-audit/main/vps-audit.sh
+```
 
 ## Requirements
 
-- Linux system (multi-distro support)
-- Root access or sudo privileges
-- Bash 4.0+
+- Linux, run as **root** (`sudo`), with **Bash 4.0 or newer**. Alpine ships without
+  Bash: `apk add bash`.
+- Standard tools every server has (`grep`, `awk`, `sed`, `find`, `stat`, `date`,
+  `hostname`). Everything else is optional and the audit degrades gracefully
+  without it: `ss`, `sshd`, `nft`/`iptables`/`ufw`/`firewall-cmd`, `sysctl`,
+  `journalctl`, `docker`, `curl` (public IP lookup only).
 
-### Supported Distributions
+### Tested systems
 
-- **Debian/Ubuntu** family (Debian, Ubuntu, Mint, Pop!_OS, etc.)
-- **RHEL/CentOS** family (RHEL, CentOS, Fedora, Rocky, Alma, etc.)
-- **Arch** family (Arch, Manjaro, EndeavourOS)
-- **SUSE** family (openSUSE, SLES)
-- **Alpine** Linux
+Each image below is run in a container by `tests/matrix.sh`: the unit tests,
+real-state scenarios (nftables rules, mounted filesystems, `sshd -T`) and a full
+audit whose JSON is validated. Versions are the ones the last run reported. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Installation
+| System | Container image | Bash |
+|--------|-----------------|------|
+| Ubuntu 26.04.1 LTS | `ubuntu:26.04` | 5.3.9 |
+| Ubuntu 24.04.5 LTS | `ubuntu:24.04` | 5.2.21 |
+| Ubuntu 22.04.5 LTS | `ubuntu:22.04` | 5.1.16 |
+| Debian GNU/Linux 13 (trixie) | `debian:13` | 5.2.37 |
+| Debian GNU/Linux 12 (bookworm) | `debian:12` | 5.2.15 |
+| Fedora Linux 44 (Container Image) | `fedora:44` | 5.3.9 |
+| Fedora Linux 43 (Container Image) | `fedora:43` | 5.3.0 |
+| Rocky Linux 10.2 (Red Quartz) | `rockylinux/rockylinux:10` | 5.2.26 |
+| Rocky Linux 9.8 (Blue Onyx) | `rockylinux/rockylinux:9` | 5.1.8 |
+| AlmaLinux 10.2 (Lavender Lion) | `almalinux:10` | 5.2.26 |
+| AlmaLinux 9.8 (Olive Jaguar) | `almalinux:9` | 5.1.8 |
+| Amazon Linux 2023.12.20260918 | `amazonlinux:2023` | 5.2.15 |
+| openSUSE Leap 16.0 | `opensuse/leap:16.0` | 5.2.37 |
+| Arch Linux | `archlinux:latest` | 5.3.20 |
+| Alpine Linux v3.24 | `alpine:3.24` | 5.3.9 |
+| Alpine Linux v3.23 | `alpine:3.23` | 5.3.3 |
+| Alpine Linux v3.22 | `alpine:3.22` | 5.2.37 |
 
-1. Download the script:
+Official Bash builds (on Alpine) cover the Bash versions. The oldest four run only the
+full audit, because the test harness itself needs Bash 4.4. Their verdicts matched
+Bash 5.3's, apart from live values and the OS release each image ships.
 
-```bash
-wget https://raw.githubusercontent.com/tomtom215/vps-audit/main/vps-audit.sh
-# or
-curl -O https://raw.githubusercontent.com/tomtom215/vps-audit/main/vps-audit.sh
-```
+| Bash | Container image | What runs |
+|------|-----------------|-----------|
+| 4.0.44 | `bash:4.0` | full audit |
+| 4.1.17 | `bash:4.1` | full audit |
+| 4.2.53 | `bash:4.2` | full audit |
+| 4.3.48 | `bash:4.3` | full audit |
+| 4.4.23 | `bash:4.4` | unit tests, scenarios, full audit |
+| 5.1.16 | `bash:5.1` | unit tests, scenarios, full audit |
+| 5.3.20 | `bash:5.3` | unit tests, scenarios, full audit |
 
-2. Make the script executable:
-
-```bash
-chmod +x vps-audit.sh
-```
+Other Linux distributions generally work; the checks that need a tool or file
+that is absent report that instead of guessing.
 
 ## Usage
 
-Run the script with sudo privileges:
-
-```bash
-sudo ./vps-audit.sh
 ```
+VPS Security Audit Tool v2.5.0
 
-### Quick Start for New VPS
+A read-only security audit for Linux VPS servers. Run it on a new server to
+find what to fix first. It never changes your configuration.
 
-If you just received credentials for a new VPS, run:
-
-```bash
-# First, see what needs to be done
-sudo ./vps-audit.sh
-
-# For step-by-step hardening guidance
-sudo ./vps-audit.sh --guide
-```
-
-### Command Line Options
-
-```
 Usage: ./vps-audit.sh [OPTIONS]
 
 Options:
-    -h, --help              Show help message
+    -h, --help              Show this help message
     -v, --version           Show version information
     -q, --quiet             Suppress console output (for cron jobs)
-    -o, --output DIR        Output directory for report (default: current)
-    -f, --format FORMAT     Output format: text, json, both (default: text)
+    -o, --output DIR        Output directory for the report (default: current)
+    -f, --format FORMAT     Report format: text, json, both (default: text)
     -V, --verbose           Enable verbose/debug output
-    --guide                 Show quick-start hardening guide for new VPS
-    --no-network            Skip checks requiring network access
-    --no-suid               Skip SUID file scan (can be slow)
-    --checks LIST           Comma-separated list of checks to run
-    --dry-run               Show what checks would run without executing
+    --no-color              Disable colored output (also: NO_COLOR=1)
+    --guide                 Show a quick-start hardening guide for a new VPS
+    --no-network            Do not contact other machines (no public IP lookup,
+                            no package-index refresh, no hostname DNS lookup)
+    --no-suid               Skip the SUID/SGID file scan (can be slow)
+    --checks LIST           Comma-separated list of check categories to run
+    --dry-run               Show which checks would run without running them
 
-Threshold Options:
-    --disk-warn PCT         Disk usage warning threshold (default: 50)
-    --disk-fail PCT         Disk usage failure threshold (default: 80)
-    --mem-warn PCT          Memory usage warning threshold (default: 50)
-    --mem-fail PCT          Memory usage failure threshold (default: 80)
+Threshold Options (percentages are 1-100):
+    --disk-warn PCT         Disk usage warning threshold (default: 80)
+    --disk-fail PCT         Disk usage failure threshold (default: 90)
+    --mem-warn PCT          Memory usage warning threshold (default: 80)
+    --mem-fail PCT          Memory usage failure threshold (default: 90)
     --login-warn NUM        Failed login warning threshold (default: 10)
     --login-fail NUM        Failed login failure threshold (default: 50)
+
+Check Categories (for --checks):
+    ssh         SSH configuration, hardening and key permissions
+    firewall    Host firewall (UFW, firewalld, nftables, iptables)
+    ips         Intrusion prevention (fail2ban, CrowdSec)
+    updates     Pending updates and automatic updates
+    logins      Failed login attempts
+    services    Running services and legacy plaintext daemons
+    ports       Open ports
+    resources   Disk, memory and CPU usage
+    sudo        sudo logging and sudoers review
+    password    Password policy and account lockout
+    suid        SUID/SGID file scan
+    mac         SELinux / AppArmor
+    kernel      Kernel and network sysctl hardening, risky protocols
+    users       User accounts and home directory permissions
+    files       Sensitive file, log and umask permissions
+    mounts      Mount options of /tmp, /var/tmp and /dev/shm
+    time        Time synchronisation
+    audit       auditd and process accounting
+    integrity   File-integrity monitoring and rootkit scanners
+    core        Core dump settings
+    cron        Cron permissions and access control
+    network     IPv6, wireless, NFS exports and exposed backend services
+    docker      Docker daemon and container security
+    system      Reboot needed, PATH, boot security, banner, compilers
+
+Examples:
+    sudo ./vps-audit.sh                         # Run all checks
+    sudo ./vps-audit.sh --guide                 # Hardening guide for a new VPS
+    sudo ./vps-audit.sh -q -f json              # Quiet, JSON report (for cron)
+    sudo ./vps-audit.sh --no-suid --no-network  # Skip slow and network parts
+    sudo ./vps-audit.sh --checks ssh,firewall   # Only these categories
+
+Exit Codes:
+    0   No check failed (warnings are allowed)
+    1   One or more checks failed
+    2   A critical security issue was found
+
+Report bugs to: https://github.com/tomtom215/vps-audit/issues
 ```
-
-### Available Check Categories
-
-| Category | Description |
-|----------|-------------|
-| ssh | SSH configuration (root login, password auth, port, key permissions) |
-| firewall | Firewall status (UFW, firewalld, iptables, nftables) |
-| ips | Intrusion prevention (fail2ban, crowdsec) |
-| updates | System updates and auto-updates |
-| logins | Failed login attempts |
-| services | Running services analysis |
-| ports | Open ports detection |
-| resources | Disk, memory, CPU usage |
-| sudo | Sudo logging configuration |
-| password | Password policy and account lockout |
-| suid | SUID/SGID file scanning |
-| mac | SELinux/AppArmor status |
-| kernel | Kernel hardening (sysctl settings) |
-| users | User account auditing |
-| files | File permissions (world-writable, logs, umask) |
-| time | Time synchronization |
-| audit | Audit daemon status |
-| core | Core dump settings |
-| cron | Cron security |
-| network | Network protocols, IPv6, wireless |
 
 ### Examples
 
 ```bash
-# Run all checks
-sudo ./vps-audit.sh
-
-# Show hardening guide for new VPS
-sudo ./vps-audit.sh --guide
-
-# Quiet mode with JSON output (for cron jobs)
-sudo ./vps-audit.sh -q -f json
-
-# Skip slow checks (SUID scan and network)
-sudo ./vps-audit.sh --no-suid --no-network
-
-# Custom thresholds
-sudo ./vps-audit.sh --disk-warn 60 --disk-fail 90
-
-# Run specific checks only
-sudo ./vps-audit.sh --checks ssh,firewall,updates
-
-# Preview what would run
-sudo ./vps-audit.sh --dry-run
+sudo ./vps-audit.sh                              # everything, text report in the current directory
+sudo ./vps-audit.sh -f both -o /var/log/vps-audit    # text + JSON in a directory that already exists
+sudo ./vps-audit.sh --checks ssh,firewall,updates    # only some categories
+sudo ./vps-audit.sh --no-suid --no-network       # skip the slow scan and all network access
+sudo ./vps-audit.sh --dry-run                    # show what would run
 ```
 
-## Output Format
+Colour is used only on a terminal and is switched off by `--no-color`, by the
+[`NO_COLOR`](https://no-color.org) environment variable, and by `TERM=dumb`.
+Long lines wrap to the terminal width; when output goes to a file or pipe they
+are left whole.
 
-The script provides multiple output types:
+## What is checked
 
-### Console Output (color-coded)
+| Category | Covers |
+|----------|--------|
+| `ssh` | SSH configuration, hardening and key permissions |
+| `firewall` | Host firewall (UFW, firewalld, nftables, iptables) |
+| `ips` | Intrusion prevention (fail2ban, CrowdSec) |
+| `updates` | Pending updates and automatic updates |
+| `logins` | Failed login attempts |
+| `services` | Running services and legacy plaintext daemons |
+| `ports` | Open ports |
+| `resources` | Disk, memory and CPU usage |
+| `sudo` | sudo logging and sudoers review |
+| `password` | Password policy and account lockout |
+| `suid` | SUID/SGID file scan |
+| `mac` | SELinux / AppArmor |
+| `kernel` | Kernel and network sysctl hardening, risky protocols |
+| `users` | User accounts and home directory permissions |
+| `files` | Sensitive file, log and umask permissions |
+| `mounts` | Mount options of /tmp, /var/tmp and /dev/shm |
+| `time` | Time synchronisation |
+| `audit` | auditd and process accounting |
+| `integrity` | File-integrity monitoring and rootkit scanners |
+| `core` | Core dump settings |
+| `cron` | Cron permissions and access control |
+| `network` | IPv6, wireless, NFS exports and exposed backend services |
+| `docker` | Docker daemon and container security |
+| `system` | Reboot needed, PATH, boot security, banner, compilers |
 
-```
-[PASS] SSH Root Login - Root login is disabled
-[WARN] SSH Port - Using standard port 22
-[FAIL] Firewall Status - No firewall tool found
-```
+Selected behaviours worth knowing:
 
-### Priority-Ordered Recommendations
+- **Firewall**: a host counts as firewalled only if inbound traffic is
+  default-denied (UFW, firewalld, an nftables input chain with `policy drop` or a
+  final drop, iptables `INPUT` policy/final DROP). Docker's and fail2ban's own
+  chains do not count. A cloud provider's network firewall is not visible to the
+  script.
+- **SSH**: reads the effective configuration from `sshd -T`. Password login is
+  detected through keyboard-interactive/PAM and `AuthenticationMethods`, not only
+  `PasswordAuthentication`.
+- **Docker**: published ports bypass UFW/firewalld; the audit lists them.
+- **OS support**: warns before, and fails after, the end of support of the
+  running release.
+- **SUID/SGID and world-writable scans** cover every local filesystem and skip
+  container image storage.
 
-Recommendations are automatically sorted by priority:
-- **CRITICAL** - Fix immediately (e.g., root login enabled, no firewall)
-- **HIGH** - Fix soon (e.g., password auth, missing updates)
-- **MEDIUM** - Address when possible (e.g., SUID files, kernel settings)
-- **LOW** - Nice to have (e.g., login banner, process accounting)
+## Understanding the output
 
-### JSON Report
+The same run ends with a summary and the to-do list, most urgent first:
 
-Machine-readable format for integration with monitoring tools:
+![Sample summary and recommendations](docs/sample-summary.png)
+
+| Status | Meaning |
+|--------|---------|
+| `PASS` | Checked and fine. |
+| `WARN` | Worth fixing. |
+| `FAIL` | A real weakness. `CRITICAL` marks the ones to fix immediately (for example no firewall, root login with a password, an unsupported OS). |
+| `INFO` | Worth knowing, **not scored** and never changes the exit code: optional hardening, or something that cannot be assessed here. |
+
+Recommendations are ordered **critical, high, medium, low**. Priority follows the
+verdict: a critical `FAIL` is critical, any other `FAIL` is high, a `WARN` is
+medium, and `INFO` and defence-in-depth warnings are low.
+
+**Security score** is the share of scored checks (`PASS` + `WARN` + `FAIL`) that
+passed. It is a rough progress indicator, not a certification. The one-line
+assessment never says "Excellent" or "Good" while a `FAIL` is open, and only
+mentions critical issues when there is one.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | No check failed (warnings are allowed). |
+| `1` | At least one `FAIL`. |
+| `2` | At least one **critical** `FAIL`. |
+
+Argument errors exit `1`; running without root exits `1`.
+
+## JSON report
+
+`-f json` or `-f both` writes `vps-audit-report-<timestamp>-<id>.json` next to the
+text report.
 
 ```json
 {
-  "version": "2.4.0",
-  "timestamp": "2025-01-15T10:30:00+00:00",
+  "version": "2.5.0",
+  "schema_version": 1,
+  "timestamp": "2026-10-03T22:54:21+00:00",
   "hostname": "myserver",
-  "os": "Ubuntu 24.04 LTS",
+  "os": "Ubuntu 24.04.5 LTS",
   "checks": [
     {
       "name": "SSH Root Login",
-      "status": "PASS",
-      "message": "Root login is disabled",
-      "recommendation": "",
-      "critical": false
+      "category": "ssh",
+      "status": "WARN",
+      "message": "Root login allowed with key only (no password)",
+      "recommendation": "Consider setting PermitRootLogin to 'no' and using a regular user with sudo",
+      "critical": false,
+      "priority": "medium"
     }
   ],
   "summary": {
-    "pass": 35, "warn": 5, "fail": 2, "critical_fail": 1,
-    "total": 42, "score": 83, "duration_seconds": 9
+    "pass": 25,
+    "warn": 14,
+    "fail": 1,
+    "info": 10,
+    "critical_fail": 1,
+    "total": 40,
+    "score": 62,
+    "duration_seconds": 6
   }
 }
 ```
 
-Each check object includes its `recommendation` (empty for passing checks) and a
-`critical` boolean. The `summary` includes `total`, the `score` percentage, and
-the wall-clock `duration_seconds` of the run.
+<sub>Abridged: one of the 50 checks from a real run on an Ubuntu 24.04 container is
+shown, with the hostname replaced. The summary is the real one.</sub>
 
-## Exit Codes
+- `status`: `PASS`, `WARN`, `FAIL` or `INFO`. `priority`: `null` for `PASS`,
+  otherwise `critical`, `high`, `medium` or `low`. `critical` is only ever true
+  for a `FAIL`.
+- `summary.total` counts **scored** checks only (`pass + warn + fail`);
+  `info` is counted separately.
+- `schema_version` changes only for an incompatible change to this layout.
 
-- `0` - All checks passed (or only warnings)
-- `1` - One or more checks failed
-- `2` - Critical security issues found
+```bash
+# Every non-passing, scored check, most urgent first
+jq -r '.checks | map(select(.status == "WARN" or .status == "FAIL"))
+       | sort_by({critical: 0, high: 1, medium: 2, low: 3}[.priority])
+       | .[] | "\(.priority)\t\(.name)\t\(.message)"' report.json
 
-## Thresholds
+# Fail a pipeline on any critical failure
+jq -e '.summary.critical_fail == 0' report.json
+```
 
-### Resource Usage Thresholds
+## Configuration file
 
-| Level | Default |
-|-------|---------|
-| PASS  | < 50% usage |
-| WARN  | 50-80% usage |
-| FAIL  | > 80% usage |
-
-### Security Thresholds
-
-| Check | PASS | WARN | FAIL |
-|-------|------|------|------|
-| Failed Logins | < 10 | 10-50 | > 50 |
-| Running Services | < 20 | 20-40 | > 40 |
-| Open Ports | < 10 | 10-20 | > 20 |
-| Public Ports | < 3 | 3-5 | > 5 |
-
-## Configuration File
-
-You can create a configuration file to set defaults:
-
-**Locations (loaded in this order, each overriding the previous):**
-1. `/etc/vps-audit.conf` (system-wide)
-2. `~/.vps-audit.conf` (per-user)
-3. `./.vps-audit.conf` (current directory)
-
-**Precedence (lowest to highest):** built-in defaults → config file → command-line flags.
-Config files set *defaults*; any option you pass on the command line always wins.
-Where multiple config files exist, the more specific (later) one overrides the
-earlier one.
-
-**Example configuration:**
+Defaults can be set in `/etc/vps-audit.conf`, `~/.vps-audit.conf` or
+`./.vps-audit.conf` (loaded in that order, later wins). Precedence is built-in
+defaults, then config file, then command-line flags.
 
 ```bash
 # /etc/vps-audit.conf
 CONFIG[output_format]="both"
-CONFIG[quiet]="false"
-THRESHOLDS[disk_warn]=60
-THRESHOLDS[disk_fail]=85
-THRESHOLDS[failed_logins_warn]=20
+THRESHOLDS[disk_warn]=85
+THRESHOLDS[disk_fail]=95
+THRESHOLDS[failed_logins_warn]=50
 ```
 
-**Security note:** Config files are *sourced* as root, so they are validated
-before use. A file is ignored (with a warning) unless it is owned by root or the
-invoking user **and** is not writable by group or other. Keep them `chmod 600`
-(or `644`), never group/world-writable.
+Config files are *sourced as root*, so a file is ignored (with a warning) unless it
+is owned by root or the invoking user and is not writable by group or others.
 
-## Security Features
+| Threshold | Default | Meaning |
+|-----------|---------|---------|
+| `disk_warn` / `disk_fail` | 80 / 90 | Root filesystem usage, percent |
+| `mem_warn` / `mem_fail` | 80 / 90 | Memory in use excluding reclaimable cache, percent |
+| `failed_logins_warn` / `_fail` | 10 / 50 | Failed SSH login log entries in 24 hours |
+| `public_ports_warn` / `_fail` | 6 / 11 | Publicly reachable listening ports |
+| `ports_warn` / `ports_fail` | 15 / 30 | All listening ports |
 
-### Secure Report Files
-- Reports are created with `600` permissions (owner read/write only)
-- Uses `mktemp` for secure file creation
-- Restrictive umask applied during execution
-
-### Safe Execution
-- Validates all inputs before use
-- Secure configuration file validation (ownership/permissions checked)
-- Proper error handling throughout
-- Cleanup on interruption
-- Prerequisites check before running
-
-## Dependencies
-
-### Core (required)
-- `bash` >= 4.0
-- `coreutils` (grep, awk, sed, cut, find, stat, etc.)
-
-### Recommended
-- `curl` - For public IP detection
-- `ss` or `netstat` - For port scanning
-- `sysctl` - For kernel parameter checking
-- `journalctl` - For log analysis on systemd systems
-
-### Optional (for specific checks)
-- `docker` - Container security checks
-- `ufw` / `firewall-cmd` / `iptables` - Firewall checks
-- `auditctl` - Audit system checks
-- `aa-status` - AppArmor checks
-- `getenforce` - SELinux checks
-- `mokutil` - Secure Boot status
-
-## Best Practices
-
-1. **Run immediately after VPS provisioning** - Identify issues before deployment
-2. Run the audit regularly (e.g., weekly via cron)
-3. Review the generated report thoroughly
-4. Address any FAIL status immediately (especially CRITICAL)
-5. Investigate WARN status during maintenance
-6. Keep the script updated with your security policies
-
-## Cron Job Example
+## Running it on a schedule
 
 ```bash
-# Run weekly audit with JSON output, email results
-0 2 * * 0 /usr/local/bin/vps-audit.sh -q -f json -o /var/log/vps-audit/
+# Weekly, quietly, JSON only
+0 2 * * 0  /usr/local/bin/vps-audit.sh -q -f json -o /var/log/vps-audit
 ```
+
+`-q` suppresses console output. The report path is not printed in quiet mode, so
+use a fixed `-o` directory (it must exist). The script exits `0`, `1` or `2`, so
+a monitoring wrapper can alert on the exit status.
+
+## Privacy and safety
+
+- **Read-only.** It never changes configuration. The only files it leaves behind
+  are the report(s), mode `600`.
+- **Commands it runs** are queries, for example `sshd -T`, `nft list ruleset`, `iptables -S`,
+  `ufw status`, `sysctl -n`, `ss`, `journalctl`, `apt-get -s upgrade` (a
+  simulation), `dnf check-update`, `docker ps/inspect/info`, and a recursive
+  `find` for SUID/SGID/world-writable files.
+- **Network.** Unless `--no-network` is given, it makes up to three HTTPS
+  requests to public IP-echo services (`api.ipify.org`, `ifconfig.me`,
+  `icanhazip.com`) to show the server's public IP, and `dnf`/`yum`/`zypper` may
+  refresh repository metadata. With `--no-network` it opens no connection to
+  another machine (checked by tracing the audit's socket calls); it still talks
+  to local services such as the Docker socket and the kernel.
+- **Reports contain** hostnames, usernames and IP addresses. Redact them before
+  sharing a report publicly.
+- Text taken from the audited system is stripped of control characters before it
+  is printed, so a hostile username or file name cannot drive your terminal.
 
 ## Limitations
 
-- This is an **audit tool**, not an automatic hardening tool
-- Some checks may need customization for specific environments
-- Not a replacement for professional security audit
-- Container-based checks require Docker daemon running
+- An audit tool, not a hardening tool: it tells you what to change.
+- Findings are heuristics. A check can be wrong for an unusual setup; please
+  [report it](https://github.com/tomtom215/vps-audit/issues/new/choose) with the
+  evidence.
+- It cannot see a cloud provider's external firewall, or what runs *inside*
+  containers.
+- Not a replacement for a professional security review.
 
-## Contributing
+## Development
 
-Feel free to submit issues and enhancement requests!
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short: `./tests/run.sh` runs the tests,
+`tests/matrix.sh` runs them inside every supported distribution.
+
+## Security
+
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Testing
-
-This project includes a comprehensive test suite to ensure reliability across different Linux distributions.
-
-### Running Integration Tests
-
-```bash
-# Run integration tests
-./tests/integration-tests.sh
-```
-
-### Multi-Distribution Testing (Docker)
-
-Test the script across multiple distributions using Docker:
-
-```bash
-# Test all supported distributions
-./test-matrix.sh
-
-# Test specific distributions
-./test-matrix.sh ubuntu debian
-./test-matrix.sh alpine
-
-# List available distributions
-./test-matrix.sh -l
-```
-
-Supported test distributions:
-- Ubuntu 22.04, 24.04
-- Debian 11, 12
-- Rocky Linux 9
-- AlmaLinux 9
-- Fedora 39, 40
-- Alpine 3.19, 3.20
-- Arch Linux
-- openSUSE Leap 15.5
-
-## Changelog
-
-### Version 2.4.0 (Fork)
-
-Robustness, correctness, and security hardening pass.
-
-**Correctness fixes**
-- Fixed the `grep -c … || echo 0` idiom (18+ sites) that produced a two-line
-  `"0\n0"` on zero matches and broke numeric checks — a **fully up-to-date
-  system was misreported as "unable to determine updates"**. Update counting now
-  also honours per-manager exit codes (dnf/yum `100`, pacman `1`).
-- Open-ports check no longer drops **UDP** ports (removed the `ss state
-  listening` filter) and correctly classifies `127.0.0.53` (systemd-resolved)
-  and IPv6 addresses as loopback instead of "public".
-- Core-dump check no longer reports a **false PASS** from the default
-  `fs.suid_dumpable=0`; it requires an actual restriction.
-- SUID/SGID scans use exact-path matching so a planted binary ending in a
-  safe suffix (e.g. `/opt/evil/bin/su`) can no longer evade detection.
-- Failed-login log matching handles single-digit days (`Jul  5`), which the old
-  `sed` collapse silently missed.
-- Exposed-services check now detects IPv6-wildcard (`[::]:PORT`) database binds.
-- Password-policy check reads `pwquality.conf.d/*` drop-ins and PAM inline args.
-
-**Portability / robustness**
-- Pinned `LC_ALL=C` for deterministic parsing of `df`/`free`/`date`/`lscpu`.
-- Memory stats read `/proc/meminfo` directly (no dependency on `free -b/-h`,
-  which older BusyBox/Alpine lacks).
-- Portable report-file creation (`mktemp` suffix that Alpine/BSD accept),
-  `df -P` (no line-wrap on long device names), `portable_stat mtime` (replaces
-  non-portable `date -r`), `timeout`-guarded `hostname -f`.
-
-**Security**
-- Command-line flags now correctly override config-file values (precedence was
-  inverted). Config files that are group- or world-writable are rejected.
-- Hardened `PATH` and restrictive `umask` set for the whole run.
-- SSH settings read from the authoritative `sshd -T` effective configuration
-  (understands `Include` and `Match`), falling back to manual parsing.
-
-**Traceability & output**
-- Timestamped report filenames; report header records the invocation, package/
-  service manager, and coreutils variant; summary and JSON include run duration
-  and score. JSON checks gained `recommendation` and `critical` fields.
-
-**Testing / CI**
-- Added real sourced-function unit tests (port classification, int/JSON/byte
-  helpers, `portable_stat`) — the script is now safely `source`-able.
-- Fixed the CI ShellCheck gate, which silently never failed on warnings due to a
-  pattern that did not match ShellCheck's output format.
-
-### Version 2.3.0 (Fork)
-- Added Phase 9 advanced security checks: extended SSH hardening, sudoers
-  `NOPASSWD` review, `/tmp` mount options (noexec/nosuid/nodev), file-integrity
-  monitoring (AIDE/Tripwire), rootkit scanners (rkhunter/chkrootkit), legacy
-  plaintext services, sensitive-file permissions, Docker daemon/container
-  security, additional network sysctls, home-directory permissions, NFS export
-  safety, root `PATH` safety, and exposed backend services (DB/cache binds).
-
-### Version 2.2.0 (Fork)
-- Added comprehensive command availability detection with caching
-- Added portable stat wrapper (GNU vs BSD compatibility)
-- Added tool version detection (busybox, GNU coreutils)
-- Added multi-distribution Docker test matrix (12 distros)
-- Added integration test suite (24 tests)
-- Added GitHub Actions CI workflow
-- Improved graceful degradation when optional commands are missing
-- All scripts pass shellcheck with zero warnings
-
-### Version 2.1.0 (Fork)
-- Added 14 new production hardening checks:
-  - SSH key permissions
-  - SGID files scanning
-  - Cron security
-  - Dangerous network protocols
-  - Login banner
-  - Account lockout policy
-  - Umask settings
-  - Log file permissions
-  - Secure Boot / GRUB password
-  - Process accounting
-  - IPv6 security
-  - Wireless interface detection
-  - USB storage restrictions
-  - Compiler/development tools
-- Added `--guide` option for quick-start hardening guidance
-- Added priority-ordered recommendations (CRITICAL, HIGH, MEDIUM, LOW)
-- Added security assessment scores
-- Added Bash version check and prerequisites validation
-- Improved config file security (ownership/permission validation)
-- Improved JSON escaping for special characters
-- Enhanced help/usage with check category documentation
-- Added beginner-friendly assessment messages
-
-### Version 2.0.0
-- Complete refactoring with multi-distro support
-- Added JSON output format
-- Added command-line options and configuration files
-- Added 8 new security checks (MAC, kernel hardening, user auditing, etc.)
-- Fixed 78 identified issues from security audit
-- Improved SSH configuration parsing
-- Fixed iptables firewall detection
-- Added proper exit codes
-- Added summary statistics and recommendations
-- Improved error handling and input validation
-- Secure report file creation
-
-## Security Notice
-
-While this script helps identify common security issues, it should not be your only security measure. Always:
-
-- Keep your system updated
-- Monitor logs regularly
-- Follow security best practices
-- Consider professional security audits for critical systems
-
-## Support
-
-For support, please:
-
-1. Check the existing issues
-2. Create a new issue with detailed information
-3. Provide the output of the script and your system information
-
-Stay secure! 🔒
+MIT. See [LICENSE](LICENSE); it keeps the copyright notice of the project this one
+was derived from.

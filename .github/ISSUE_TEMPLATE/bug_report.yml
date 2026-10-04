@@ -1,0 +1,46 @@
+name: Bug report
+description: The script crashed, printed an error, or behaved unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports can contain hostnames, IP addresses and usernames. **Redact anything private** before pasting.
+        If the problem is a check giving the wrong verdict, use the "Wrong result" form instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `./vps-audit.sh --version`
+      placeholder: "VPS Security Audit Tool v2.5.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and Bash version
+      description: "`PRETTY_NAME` from /etc/os-release and `bash --version | head -1`"
+      placeholder: "Ubuntu 24.04.5 LTS, GNU bash 5.2.21"
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command you ran
+      placeholder: "sudo ./vps-audit.sh --checks ssh,firewall"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Paste the output, including any error lines.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true

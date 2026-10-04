@@ -1,5 +1,5 @@
 # EditorConfig - https://editorconfig.org
-# Ensures consistent formatting across different editors and IDEs
+# Also read by shfmt, so `shfmt -d` enforces the shell settings below.
 
 root = true
 
@@ -13,11 +13,10 @@ insert_final_newline = true
 
 [*.sh]
 indent_size = 4
+# shfmt: indent `case` branches one level
+switch_case_indent = true
 
-[*.yml]
-indent_size = 2
-
-[*.yaml]
+[*.{yml,yaml}]
 indent_size = 2
 
 [*.md]

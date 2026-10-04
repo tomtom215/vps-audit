@@ -4,6 +4,8 @@
 # Follow source statements to check included files
 external-sources=true
 
-# Minimum severity level (error, warning, info, style)
-# Set to "style" to catch every possible issue - zero exceptions policy
+# Minimum severity level (error, warning, info, style). "style" reports
+# everything. The only exemptions are the per-file and single-line
+# `# shellcheck disable=` directives, each explained in CONTRIBUTING.md or beside
+# the line.
 severity=style

@@ -1,0 +1,9 @@
+# Linters used by CI and recommended for local development:
+#   pip install --require-hashes -r .github/requirements-lint.txt
+# Pinned with hashes (x86_64 Linux wheels) so a compromised or yanked upload
+# cannot change what CI runs. Dependabot keeps these current.
+shellcheck-py==0.11.0.1 \
+    --hash=sha256:1b274df81de5b000ff78db433e7328b87e52e3c38481c60f8e488c3095beef05
+shfmt-py==4.2.0 \
+    --hash=sha256:867b55792952d4e4aa27a1b2d578e63b745a77e11b7742d2f6258ef123a9c8f2 \
+    --hash=sha256:e615cfcfe3e184f59e3ac2574895542976995a46f7506b327c8af71ae02de84c
