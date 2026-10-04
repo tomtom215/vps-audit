@@ -361,3 +361,16 @@ test_guide_prose_fits_a_40_column_terminal() {
         [[ ${#line} -le 40 ]] || fail "guide line is ${#line} columns: [$line]" || return 1
     done <<<"$out"
 }
+
+# The guide used to tell people to restart sshd in place, which can lock them out
+# of a server whose new config is wrong, and gave Debian/Ubuntu commands without
+# saying so.
+test_guide_keeps_the_session_open_validates_sshd_and_names_its_scope() {
+    run_audit --guide
+    assert_status 0 "$STATUS" || return 1
+    assert_contains "$OUT" "Keep your current SSH session open" || return 1
+    assert_contains "$OUT" "confirm a second login works" || return 1
+    assert_contains "$OUT" "sshd -t && systemctl reload ssh" "validate before reloading" || return 1
+    assert_contains "$OUT" "Debian/Ubuntu" "say which systems the commands are for" || return 1
+    assert_not_contains "$OUT" "systemctl restart ssh" || return 1
+}
